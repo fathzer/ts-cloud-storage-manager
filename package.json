@@ -1,0 +1,28 @@
+{
+  "name": "ts-cloud-storage-manager",
+  "version": "0.1.0",
+  "description": "Client-side cloud storage manager for SPAs — OAuth2 + PKCE providers (Dropbox, OneDrive, Google Drive) with revision-aware load/save for optimistic concurrency.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json"
+  },
+  "devDependencies": {
+    "bun-types": "^1.4.2",
+    "typescript": "^7.0.2"
+  },
+  "license": "Apache-2.0"
+}

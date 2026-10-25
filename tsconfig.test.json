@@ -1,0 +1,12 @@
+{
+  // Type-checks test files, which the build tsconfig excludes (they must
+  // not be emitted into dist/).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // tests may live outside the src tree, so the src rootDir constraint is dropped.
+    "rootDir": "."
+  },
+  "include": ["src/**/*.test.ts", "tests/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
