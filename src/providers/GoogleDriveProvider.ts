@@ -52,7 +52,7 @@ declare global {
 interface DriveFile {
   id?: string;
   name?: string;
-  version?: string;
+  headRevisionId?: string;
   appProperties?: Record<string, string>;
 }
 
@@ -436,18 +436,20 @@ export class GoogleDriveProvider extends StorageProvider {
     return null;
   }
 
-  /** The Drive revision token (`version`) of the data file — metadata only.
-   *  Drive v3 exposes no file-level etag (that was a v2 field). */
+  /** The Drive revision token (`headRevisionId`) of the data file —
+   *  metadata only. `version` is not usable: Drive bumps it on server-side
+   *  metadata touches post-upload (and possibly on metadata reads), so it
+   *  produces phantom "remote changed" detections. */
   async _fetchFileVersion(fileId: string): Promise<string | null> {
     const res = await this._executeWithAuthRetry(async () => {
       return await fetch(
-        `https://www.googleapis.com/drive/v3/files/${fileId}?fields=version`,
+        `https://www.googleapis.com/drive/v3/files/${fileId}?fields=headRevisionId`,
         { headers: { Authorization: `Bearer ${this.accessToken}` } }
       );
     });
     if (!res.ok) return null;
     const meta = await res.json() as DriveFile;
-    return meta.version ?? null;
+    return meta.headRevisionId ?? null;
   }
 
   override async load(): Promise<RemoteData | null> {
@@ -495,7 +497,7 @@ export class GoogleDriveProvider extends StorageProvider {
   async _updateExistingFile(fileId: string, content: string): Promise<SaveResult> {
     const res = await this._executeWithAuthRetry(async () => {
       return await fetch(
-        `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&fields=id,version`,
+        `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&fields=id,headRevisionId`,
         {
           method: 'PATCH',
           headers: {
@@ -509,7 +511,7 @@ export class GoogleDriveProvider extends StorageProvider {
 
     if (!res.ok) throw new Error(`Google Drive upload failed: HTTP ${res.status}`);
     const meta = await res.json() as DriveFile;
-    return { status: 'saved', rev: meta.version ?? null };
+    return { status: 'saved', rev: meta.headRevisionId ?? null };
   }
 
   async _createNewFile(content: string): Promise<SaveResult> {
@@ -525,7 +527,7 @@ export class GoogleDriveProvider extends StorageProvider {
 
     const res = await this._executeWithAuthRetry(async () => {
       return await fetch(
-        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,version',
+        'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,headRevisionId',
         {
           method: 'POST',
           headers: { Authorization: `Bearer ${this.accessToken}` },
@@ -539,7 +541,7 @@ export class GoogleDriveProvider extends StorageProvider {
     if (createdFile.id) {
       this.fileId = createdFile.id;
     }
-    return { status: 'saved', rev: createdFile.version ?? null };
+    return { status: 'saved', rev: createdFile.headRevisionId ?? null };
   }
 
   override async getRemoteRevision(): Promise<string | null> {

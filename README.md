@@ -215,7 +215,7 @@ string, which serves both as a **write guard** and as a **change marker**:
 |---|---|
 | Dropbox | the file `rev` |
 | OneDrive | the drive item `eTag` |
-| Google Drive | the file `version` (Drive v3 has no file-level etag — that was a v2 field) |
+| Google Drive | the file `headRevisionId` |
 | ReadOnly | the HTTP `ETag` header, when the server sends one |
 
 Once discovered, the file is addressed by its **server-side file id**
@@ -234,7 +234,7 @@ offers, so a stale writer is rejected server-side whenever possible:
 |---|---|---|
 | Dropbox | `files/upload` with `mode: update:<baseRev>` | HTTP 409 `path/conflict` |
 | OneDrive | `if-match: <eTag>` header on the content `PUT` | HTTP 412 |
-| Google Drive | check-then-write: `version` is re-read and compared before the media `PATCH` | `version` mismatch → `'conflict'` |
+| Google Drive | check-then-write: `headRevisionId` is re-read and compared before the media `PATCH` | rev mismatch → `'conflict'` |
 | ReadOnly | saves are dropped anyway | — |
 
 On Google Drive the check and the write are two requests — Drive v3 does
@@ -249,7 +249,7 @@ One metadata request per call; the file content is never transferred:
 |---|---|---|
 | Dropbox | `POST /2/files/get_metadata` | the file `rev` |
 | OneDrive | `GET /me/drive/items/<id>?$select=id,name,eTag` | the item `eTag` |
-| Google Drive | `GET /drive/v3/files/<id>?fields=version` | the file `version` |
+| Google Drive | `GET /drive/v3/files/<id>?fields=headRevisionId` | `headRevisionId` |
 | ReadOnly | — | `null` (the `ETag` only piggy-backs on `load()`) |
 
 Two quirks worth knowing: OneDrive's `eTag` also changes on pure-metadata
