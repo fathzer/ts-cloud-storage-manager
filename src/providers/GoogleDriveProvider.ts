@@ -1,7 +1,18 @@
 import { bindOverlayClose } from '../overlayClose.js';
 import { StorageProvider } from '../StorageProvider.js';
 import type { StorageStatus, RemoteData, SaveResult } from '../StorageProvider.js';
+import type { ConfirmDialogRequest } from '../config.js';
 import type { AuthFailure, AuthFailureKind } from '../AuthFailure.js';
+
+export interface GoogleDriveOptions {
+  /** Name of the data file (default 'data.json'). */
+  fileName?: string;
+  /** appProperties tag identifying the data file (default 'appdata'). */
+  appTag?: string;
+  /** App-provided renderer for mid-flow confirmations (reconnection,
+   *  missing scopes); falls back to the built-in English dialogs. */
+  confirmDialog?: (request: ConfirmDialogRequest) => Promise<boolean>;
+}
 
 // Minimal type declarations for the Google Identity Services (GIS) client.
 // Loaded dynamically from https://accounts.google.com/gsi/client.
@@ -68,11 +79,19 @@ export class GoogleDriveProvider extends StorageProvider {
   _pendingAuthError: ((error: GisErrorCallbackPayload) => void) | null;
   _authFailure: AuthFailure | null;
 
-  constructor(clientId: string, fileName = 'data.json', appTag = 'appdata') {
+  confirmDialog?: (request: ConfirmDialogRequest) => Promise<boolean>;
+
+  /**
+   * @param clientId the Google OAuth client id.
+   * @param options file name, appProperties tag and the injectable
+   *        confirmDialog hook.
+   */
+  constructor(clientId: string, options: GoogleDriveOptions = {}) {
     super();
     this.clientId = clientId;
-    this.fileName = fileName;
-    this.appTag = appTag;
+    this.fileName = options.fileName ?? 'data.json';
+    this.appTag = options.appTag ?? 'appdata';
+    this.confirmDialog = options.confirmDialog;
     this.accessToken = localStorage.getItem('gdrive_token') || null;
     this.tokenExpiration = localStorage.getItem('gdrive_token_expiration') || null;
     this.userEmail = localStorage.getItem('gdrive_user_email') || null;
@@ -253,121 +272,81 @@ export class GoogleDriveProvider extends StorageProvider {
   }
 
   _showReconnectionDialog(): Promise<boolean> {
-    return new Promise((resolve) => {
-      const dialog = document.createElement('div');
-      dialog.innerHTML = `
-        <div class="modal-overlay">
-          <div class="modal-content help-modal-content">
-            <h2 class="help-modal-header">
-              Reconnection required
-            </h2>
-            <div class="help-modal-body">
-              <section class="help-section">
-                <h3 class="help-section-title">
-                  Access token expired
-                </h3>
-                <p>
-                  <strong>Why this window?</strong>
-                </p>
-                <p>
-                  Your Google Drive access token has expired. For security reasons, Google does not allow automatic reconnection without explicit user action unless your login data transits through our servers.<br>
-                  Such a transit would break our promise "None of your data is sent to us".
-                </p>
-                <p>
-                  <strong>What you need to do:</strong>
-                </p>
-                <p>
-                  Click the "Reconnect" button below to grant access to your Google Drive again. A pop-up window will open and ask you to confirm the authorization.
-                </p>
-                <div style="background: rgba(245, 158, 11, 0.1); border: 1px solid #f59e0b; border-radius: 6px; padding: 0.75rem; margin-top: 1rem;">
-                  <p style="margin: 0; font-size: 0.9rem;">
-                    <strong>Important:</strong> Make sure your browser allows pop-ups for this site, otherwise the Google sign-in window will not open. If you see a blocked pop-up icon in the address bar, click it to temporarily allow pop-ups.
-                  </p>
-                </div>
-              </section>
-            </div>
-            <div class="modal-actions help-modal-footer">
-              <button type="button" id="btn-cancel-reconnect" class="btn-secondary">
-                Cancel
-              </button>
-              <button type="button" id="btn-reconnect" class="btn-primary">
-                Reconnect
-              </button>
-            </div>
-          </div>
-        </div>
-      `;
-
-      document.body.appendChild(dialog);
-
-      const reconnectBtn = dialog.querySelector<HTMLButtonElement>('#btn-reconnect');
-      const cancelBtn = dialog.querySelector<HTMLButtonElement>('#btn-cancel-reconnect');
-      const overlay = dialog.querySelector<HTMLElement>('.modal-overlay');
-
-      const close = (confirmed = false) => {
-        dialog.remove();
-        resolve(confirmed);
-      };
-
-      reconnectBtn?.addEventListener('click', () => close(true));
-      cancelBtn?.addEventListener('click', () => close(false));
-      if (overlay) bindOverlayClose(overlay, () => close(false));
+    return this._confirm({
+      kind: 'reconnect',
+      title: 'Reconnection required',
+      bodyHtml: `
+        <h3 class="help-section-title">Access token expired</h3>
+        <p><strong>Why this window?</strong></p>
+        <p>Your Google Drive access token has expired. For security reasons, Google does not allow automatic reconnection without explicit user action unless your login data transits through our servers — which would break our promise "None of your data is sent to us".</p>
+        <p><strong>What you need to do:</strong></p>
+        <p>Click the "Reconnect" button below to grant access to your Google Drive again. A pop-up window will open and ask you to confirm the authorization.</p>
+        <p><strong>Important:</strong> make sure your browser allows pop-ups for this site, otherwise the Google sign-in window will not open. If you see a blocked pop-up icon in the address bar, click it to temporarily allow pop-ups.</p>
+      `,
+      confirmLabel: 'Reconnect',
+      cancelLabel: 'Cancel'
     });
   }
 
   _showMissingScopesDialog(): Promise<boolean> {
+    return this._confirm({
+      kind: 'missingScopes',
+      title: 'Missing authorization',
+      bodyHtml: `
+        <h3 class="help-section-title">Google permissions not granted</h3>
+        <p><strong>Why this window?</strong></p>
+        <p>You are signed in, but you did not grant all the permissions this application needs: access to your Google Drive files (to read and save your data) and access to your email address (to identify your account).</p>
+        <p><strong>What you need to do:</strong></p>
+        <p>Click "Retry" to display the Google consent screen again, then check every requested option.</p>
+      `,
+      confirmLabel: 'Retry',
+      cancelLabel: 'Cancel'
+    });
+  }
+
+  /** Routes a mid-flow confirmation to the app-provided renderer when one
+   *  was injected, else to the built-in English modal. */
+  _confirm(request: ConfirmDialogRequest): Promise<boolean> {
+    return this.confirmDialog
+      ? this.confirmDialog(request)
+      : this._defaultConfirmDialog(request);
+  }
+
+  /** Built-in modal rendering of a ConfirmDialogRequest (English). */
+  _defaultConfirmDialog(request: ConfirmDialogRequest): Promise<boolean> {
     return new Promise((resolve) => {
       const dialog = document.createElement('div');
       dialog.innerHTML = `
         <div class="modal-overlay">
           <div class="modal-content help-modal-content">
-            <h2 class="help-modal-header">
-              Missing authorization
-            </h2>
+            <h2 class="help-modal-header"></h2>
             <div class="help-modal-body">
-              <section class="help-section">
-                <h3 class="help-section-title">
-                  Google permissions not granted
-                </h3>
-                <p>
-                  <strong>Why this window?</strong>
-                </p>
-                <p>
-                  You are signed in, but you did not grant all the permissions this application needs: access to your Google Drive files (to read and save your data) and access to your email address (to identify your account).
-                </p>
-                <p>
-                  <strong>What you need to do:</strong>
-                </p>
-                <p>
-                  Click "Retry" to display the Google consent screen again, then check every requested option.
-                </p>
-              </section>
+              <section class="help-section"></section>
             </div>
             <div class="modal-actions help-modal-footer">
-              <button type="button" id="btn-cancel-scopes" class="btn-secondary">
-                Cancel
-              </button>
-              <button type="button" id="btn-retry-scopes" class="btn-primary">
-                Retry
-              </button>
+              <button type="button" id="btn-cancel" class="btn-secondary"></button>
+              <button type="button" id="btn-confirm" class="btn-primary"></button>
             </div>
           </div>
         </div>
       `;
+      dialog.querySelector<HTMLElement>('.help-modal-header')!.textContent = request.title;
+      dialog.querySelector<HTMLElement>('.help-section')!.innerHTML = request.bodyHtml;
+      const confirmBtn = dialog.querySelector<HTMLButtonElement>('#btn-confirm')!;
+      const cancelBtn = dialog.querySelector<HTMLButtonElement>('#btn-cancel')!;
+      confirmBtn.textContent = request.confirmLabel;
+      cancelBtn.textContent = request.cancelLabel;
+      const overlay = dialog.querySelector<HTMLElement>('.modal-overlay');
 
       document.body.appendChild(dialog);
-
-      const retryBtn = dialog.querySelector<HTMLButtonElement>('#btn-retry-scopes');
-      const cancelBtn = dialog.querySelector<HTMLButtonElement>('#btn-cancel-scopes');
-      const overlay = dialog.querySelector<HTMLElement>('.modal-overlay');
 
       const close = (confirmed = false) => {
         dialog.remove();
         resolve(confirmed);
       };
 
-      retryBtn?.addEventListener('click', () => close(true));
-      cancelBtn?.addEventListener('click', () => close(false));
+      confirmBtn.addEventListener('click', () => close(true));
+      cancelBtn.addEventListener('click', () => close(false));
       if (overlay) bindOverlayClose(overlay, () => close(false));
     });
   }

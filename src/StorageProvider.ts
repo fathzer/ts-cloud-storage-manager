@@ -6,16 +6,6 @@ export interface StorageStatus {
   userEmail?: string;
 }
 
-export interface StorageConfig {
-  googleClientId?: string;
-  dropboxAppKey?: string;
-  oneDriveClientId?: string;
-  /** Name of the data file stored in the provider's app area. */
-  fileName?: string;
-  /** Google Drive appProperties tag identifying the data file. */
-  driveAppTag?: string;
-}
-
 /** The data file as read from the cloud, together with the provider revision
  *  token identifying this exact remote version (Dropbox `rev`, OneDrive
  *  `eTag`, Drive `version`). */
@@ -37,7 +27,19 @@ export type SaveResult =
  * Subclasses must implement authentication, data load/save and status retrieval.
  */
 export abstract class StorageProvider {
+  /**
+   * Restores a persisted session (tokens in localStorage) without user
+   * interaction.
+   * @returns true when a usable session was restored.
+   */
   init(): Promise<boolean> { return Promise.resolve(false); }
+
+  /**
+   * Interactive login. Redirect-flow providers navigate the whole page away
+   * and never resolve — the flow concludes via {@link resumeAuth} on the
+   * way back.
+   * @returns true when connected (popup-flow providers only).
+   */
   abstract authenticate(): Promise<boolean>;
 
   /**
@@ -54,49 +56,66 @@ export abstract class StorageProvider {
    * checks the anti-CSRF state...). Returns 'none' when the URL carries
    * nothing this provider recognizes, true/false for the auth verdict.
    * Popup-flow providers keep the default no-op.
+   * @param _url the URL the provider sent the browser back to.
+   * @returns 'none' when the URL carries no OAuth parameter for this
+   *          provider, otherwise the auth verdict.
    */
   resumeAuth(_url: URL): Promise<boolean | 'none'> { return Promise.resolve('none'); }
 
+  /**
+   * Ends the session and clears stored credentials (tokens, file id).
+   * @returns resolves once credentials are cleared.
+   */
   disconnect(): Promise<void> { return Promise.resolve(); }
 
   /**
-   * Downloads the data file. Returns null when the remote file does not
-   * exist; the rev lets callers detect later remote changes.
+   * Downloads the data file.
+   * @returns the file content and its revision token, or null when the
+   *          remote file does not exist; the rev lets callers detect later
+   *          remote changes.
    */
   abstract load(): Promise<RemoteData | null>;
 
   /**
-   * Optimistic-concurrency save. baseRev is the rev the data was built from
-   * (null = unconditional write, used for the very first save or when the
-   * revision is unknown). Returns 'conflict' instead of overwriting a remote
-   * file that changed since baseRev.
+   * Optimistic-concurrency save.
+   * @param data the full data-file payload to write.
+   * @param baseRev the rev the data was built from — null means an
+   *        unconditional write (very first save or unknown revision).
+   * @returns 'saved' with the new remote revision, or 'conflict' when the
+   *          remote file changed since baseRev and the write was refused.
    */
   abstract save(data: unknown, baseRev: string | null): Promise<SaveResult>;
 
   /**
    * Reads the current remote revision without downloading the file content
-   * (metadata only). null = file absent or revision indeterminable. Auth
-   * errors are thrown so callers can stop polling on a dead session.
+   * (metadata only). Auth errors are thrown so callers can stop polling on
+   * a dead session.
+   * @returns the current rev, or null when the file is absent or its
+   *          revision indeterminable.
    */
   getRemoteRevision(): Promise<string | null> { return Promise.resolve(null); }
 
+  /**
+   * @returns the connection state and provider display name for the UI.
+   */
   abstract getStatus(): Promise<StorageStatus>;
 
   /**
-   * Returns a human-readable description of where the data is stored
-   * (account, file path...), or null when it is unknown.
+   * @returns a human-readable description of where the data is stored
+   *          (account, file path...), or null when it is unknown.
    */
   getDataLocation(): Promise<string | null> { return Promise.resolve(null); }
 
   /**
-   * Whether this provider silently drops saves (read-only data): the UI warns
-   * the user that changes live in memory only.
+   * @returns true when this provider silently drops saves (read-only data):
+   *          the UI warns the user that changes live in memory only.
    */
   isReadOnly(): boolean { return false; }
 
   /**
-   * Why the last interactive authenticate() attempt failed, classified for
-   * the UI (see AuthFailure.ts). Null when no attempt failed.
+   * @returns why the last interactive authenticate() attempt failed,
+   *          classified for the UI (see AuthFailure.ts); null when no
+   *          attempt failed.
    */
   getAuthFailure(): AuthFailure | null { return null; }
 }

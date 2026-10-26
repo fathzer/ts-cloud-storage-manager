@@ -60,6 +60,11 @@ export class OneDriveProvider extends StorageProvider {
   resolvedName: string | null;
   _authFailure: AuthFailure | null;
 
+  /**
+   * @param clientId the Entra application (client) id — "Single-page
+   *        application" platform.
+   * @param fileName name of the data file in the app folder.
+   */
   constructor(clientId: string, fileName = 'data.json') {
     super();
     this.clientId = clientId;

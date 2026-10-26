@@ -56,6 +56,10 @@ export class DropboxProvider extends StorageProvider {
   resolvedName: string | null;
   _authFailure: AuthFailure | null;
 
+  /**
+   * @param appKey the Dropbox app key (App folder access).
+   * @param fileName name of the data file in the app folder.
+   */
   constructor(appKey: string, fileName = 'data.json') {
     super();
     this.appKey = appKey;

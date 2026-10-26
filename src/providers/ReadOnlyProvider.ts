@@ -10,6 +10,10 @@ import type { StorageStatus, RemoteData, SaveResult } from '../StorageProvider.j
 export class ReadOnlyProvider extends StorageProvider {
   dataUrl: string;
 
+  /**
+   * @param dataUrl the plain URL serving the JSON data file (no auth);
+   *        saves are silently dropped.
+   */
   constructor(dataUrl: string) {
     super();
     this.dataUrl = dataUrl;

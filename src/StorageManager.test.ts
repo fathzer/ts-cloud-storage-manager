@@ -3,6 +3,9 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { StorageManager } from "./StorageManager.js";
 import { DropboxProvider } from "./providers/DropboxProvider.js";
 import { OneDriveProvider } from "./providers/OneDriveProvider.js";
+import { ReadOnlyProvider } from "./providers/ReadOnlyProvider.js";
+import { MemoryStore } from "./sync/LocalStore.js";
+import { UNRECONCILABLE } from "./sync/SyncEngine.js";
 
 // Bun has no DOM storage: install minimal in-memory shims before the
 // providers (which read localStorage in their constructor) are built.
@@ -17,7 +20,11 @@ class FakeStorage {
 const g = globalThis as unknown as { localStorage: FakeStorage; sessionStorage: FakeStorage; fetch: typeof fetch };
 const realFetch = globalThis.fetch;
 
-const CONFIG = { googleClientId: "google-id", dropboxAppKey: "dropbox-key", oneDriveClientId: "onedrive-id" };
+const CONFIG = {
+  google: { clientId: "google-id" },
+  dropbox: { appKey: "dropbox-key" },
+  oneDrive: { clientId: "onedrive-id" }
+};
 
 beforeEach(() => {
   g.localStorage = new FakeStorage();
@@ -35,7 +42,7 @@ describe("StorageManager providers", () => {
   });
 
   it("hides providers missing their credentials", () => {
-    const manager = new StorageManager({ googleClientId: "google-id" });
+    const manager = new StorageManager({ google: { clientId: "google-id" } });
     expect(manager.availableProviders().map(p => p.name)).toEqual(["gdrive"]);
   });
 
@@ -77,5 +84,45 @@ describe("StorageManager.resumeAuth", () => {
     const verdict = await manager.resumeAuth(new URL("https://example.com/app/?code=c&state=onedrive:s"));
     expect(verdict).toBe(false);
     expect(manager.currentProvider).toBeInstanceOf(OneDriveProvider);
+  });
+});
+
+describe("StorageManager sync lifecycle", () => {
+  it("enables sync from a bare config.sync block (default always-park policy)", () => {
+    const manager = new StorageManager({ ...CONFIG, sync: {} });
+    const engine = manager.syncEngine;
+    expect(engine).not.toBeNull();
+    // Default policy: every divergence is unreconcilable.
+    expect(engine!.policy({ base: 1, local: 1, remote: 2 })).toBe(UNRECONCILABLE);
+  });
+
+
+  it("create an engine around the active provider via enableSync", () => {
+    const manager = new StorageManager(CONFIG);
+    const engine = manager.enableSync(() => UNRECONCILABLE, { store: new MemoryStore() });
+    expect(manager.syncEngine).toBe(engine);
+    expect(engine.provider).toBe(manager.currentProvider);
+    // Idempotent: same instance on a second call.
+    expect(manager.enableSync(() => UNRECONCILABLE)).toBe(engine);
+  });
+
+  it("re-wraps the engine on provider switch, pauses on read-only", async () => {
+    const manager = new StorageManager(CONFIG);
+    const engine = manager.enableSync(() => UNRECONCILABLE, { store: new MemoryStore() });
+    manager.useProviderByName("dropbox");
+    expect(engine.provider).toBe(manager.currentProvider); // re-wrapped
+    const readOnly = new ReadOnlyProvider("https://example.com/demo.json");
+    manager.useProvider(readOnly);                          // demo session
+    expect(engine.provider).not.toBe(readOnly);             // paused, not re-wrapped
+  });
+
+  it("purges the engine state on disconnect", async () => {
+    const manager = new StorageManager(CONFIG);
+    const engine = manager.enableSync(() => UNRECONCILABLE, { store: new MemoryStore(), pollIntervalMs: 0 });
+    await engine.save({ v: 1 });                            // offline under Bun → queued/pending
+    expect(engine.getLocal()).toEqual({ v: 1 });
+    await manager.disconnect();
+    expect(engine.getLocal()).toBeNull();
+    expect(engine.baseRev).toBeNull();
   });
 });
