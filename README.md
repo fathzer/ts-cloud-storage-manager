@@ -101,6 +101,8 @@ const storage = new StorageManager({
     policy: ({ base, local, remote }) =>
       mergedData /* …or UNRECONCILABLE when a user decision is needed */,
     // pollIntervalMs: 60_000,             // visible-tab poll, 0 disables
+    // eagerPull: false,                   // detect remote changes only —
+    //                                     // adoption waits for pull()
     // store: new IdbStore('myapp-sync'),  // IndexedDB by default
   },
 });
@@ -142,7 +144,8 @@ app never creates an engine itself:
 await storage.initialize();              // inits the engine too
 const verdict = await storage.save(data); // 'saved' | 'queued' | 'conflict' | 'error'
 
-storage.onStatus(s => { /* s.pending · s.remoteChanged · s.conflict · s.lastError */ });
+storage.onStatus(s => { /* s.pending · s.remoteChanged · s.conflict ·
+                           s.conflictRemote · s.nextRetryAt · s.lastError */ });
 storage.onData(data => { /* working copy replaced by a merge — re-render */ });
 await storage.resolveConflict('local');  // or 'remote', or { merged: data }
 await storage.pull();                    // eager remote-change check + merge
@@ -160,7 +163,11 @@ construction time. The manager owns the plumbing: `initialize()`/
 state.
 
 `'queued'` is a success: the edit is persisted locally and pushed when the
-network returns (`online`, `visibilitychange`, visible-tab polling).
+network returns (`online`, `visibilitychange`, visible-tab polling) —
+`status.nextRetryAt` then gives the scheduled retry time for the UI. With
+`eagerPull: false` the watchers only *detect* remote moves (`remoteChanged`
+flag): adoption/merge waits for an explicit `pull()`, e.g. behind a
+"new version available" button.
 
 The merge policy is **invoked inside `save()`** (and inside pulls when
 both sides moved): a remote conflict → remote is downloaded →

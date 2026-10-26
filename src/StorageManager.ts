@@ -192,7 +192,11 @@ export class StorageManager {
       }
     }
     if (!found) return false;
-    if (this._engine?.provider === this.currentProvider) {
+    if (this.currentProvider.isReadOnly()) {
+      // Read-only sessions (demo) pause the engine — never re-wrap it:
+      // pending account edits must not be pushed into a silent no-op save.
+      this._engine?.pause();
+    } else if (this._engine?.provider === this.currentProvider) {
       await this._engine.init();
     } else {
       await this._engine?.setProvider(this.currentProvider);

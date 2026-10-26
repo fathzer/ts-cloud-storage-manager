@@ -18,7 +18,13 @@ the background.
 - Conflict **parking** on `UNRECONCILABLE` + three-form resolution
   (`resolveConflict('local' | 'remote' | { merged })`, git-merge style).
 - Eager pull — `getRemoteRevision()` on `online`, `visibilitychange` and a
-  visible-tab interval (`pollIntervalMs`, 60 s default).
+  visible-tab interval (`pollIntervalMs`, 60 s default). Optional
+  detect-only mode (`eagerPull: false`): the watchers flag `remoteChanged`
+  without merging — drives a "new version available" UX where adoption
+  waits for an explicit `pull()`.
+- `nextRetryAt` in the status — the scheduled push-retry time when a save
+  queued/failed, for "retry at HH:MM" UI. `lastError` also records init
+  load failures (so "no remote file" and "load failed" stay distinct).
 - Status channel: `pending`, `remoteChanged`, `conflict`, `conflictRemote`
   (the losing remote version, for the resolution UI), `lastError`.
 - Offline detection by network failure (the fetch `TypeError`), `'queued'`

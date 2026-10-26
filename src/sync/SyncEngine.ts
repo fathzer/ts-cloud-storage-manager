@@ -25,6 +25,12 @@ export interface SyncEngineOptions {
   store?: LocalStore;
   /** Metadata polling interval while the tab is visible; 0 disables (default 60 s). */
   pollIntervalMs?: number;
+  /**
+   * When false, the watchers only *detect* remote changes (remoteChanged
+   * flag) — adoption/merge waits for an explicit pull(), e.g. behind a
+   * "new version available" button. Default true.
+   */
+  eagerPull?: boolean;
 }
 
 export type SaveVerdict = 'saved' | 'queued' | 'conflict' | 'error';
@@ -38,6 +44,8 @@ export interface SyncStatus {
   conflict: boolean;
   /** The remote data that lost the merge, when parked — for the resolution UI. */
   conflictRemote?: unknown;
+  /** Timestamp (ms) of the next scheduled push retry, when queued/failed. */
+  nextRetryAt?: number;
   lastError?: string;
 }
 
@@ -61,6 +69,7 @@ export class SyncEngine {
   policy: MergePolicy;
   store: LocalStore;
   pollIntervalMs: number;
+  eagerPull: boolean;
 
   baseRev: string | null = null;
   _base: unknown = null;
@@ -70,6 +79,7 @@ export class SyncEngine {
   _conflictRemote: unknown = null;
   _remoteChanged = false;
   _lastError: string | undefined;
+  _nextRetryAt: number | undefined;
   _syncing = false;
   _watching = false;
   _timer: ReturnType<typeof setInterval> | null = null;
@@ -89,6 +99,7 @@ export class SyncEngine {
     this.policy = policy;
     this.store = options.store ?? new IdbStore();
     this.pollIntervalMs = options.pollIntervalMs ?? 60_000;
+    this.eagerPull = options.eagerPull !== false;
   }
 
   /**
@@ -110,8 +121,10 @@ export class SyncEngine {
         this.baseRev = remote?.rev ?? null;
         this._local = this._base;
         await this._persist();
-      } catch {
-        // Offline or auth failure: keep whatever local state we have.
+      } catch (e) {
+        // Offline or auth failure: keep whatever local state we have —
+        // lastError lets the app tell "no remote file" from "load failed".
+        this._recordError(e);
       }
     }
     this._startWatchers();
@@ -173,13 +186,7 @@ export class SyncEngine {
   async pull(): Promise<void> {
     if (this._syncing) return;
     try {
-      const remoteRev = await this.provider.getRemoteRevision();
-      if (remoteRev === this.baseRev) {
-        if (this._remoteChanged) { this._remoteChanged = false; this._emitStatus(); }
-        return;
-      }
-      if (remoteRev === null && this.baseRev === null) return;
-      this._remoteChanged = true;
+      if (!await this._detect()) return;
       const remote = await this.provider.load();
       const remoteData = remote?.data ?? null;
       if (!this._pending) {
@@ -206,6 +213,22 @@ export class SyncEngine {
     } catch (e) {
       this._recordError(e);
     }
+  }
+
+  /**
+   * Metadata-only remote-change check — cheap.
+   * @returns whether the remote file moved since baseRev; remoteChanged is
+   *          set/cleared accordingly.
+   */
+  async _detect(): Promise<boolean> {
+    const remoteRev = await this.provider.getRemoteRevision();
+    if (remoteRev === this.baseRev || (remoteRev === null && this.baseRev === null)) {
+      if (this._remoteChanged) { this._remoteChanged = false; this._emitStatus(); }
+      return false;
+    }
+    this._remoteChanged = true;
+    this._emitStatus();
+    return true;
   }
 
   /** Adopts remote data as base + working copy after a pull. */
@@ -328,6 +351,9 @@ export class SyncEngine {
       this._emitStatus();
       return 'conflict';
     } catch (e) {
+      // A scheduled retry is coming (poll, online, visibility) — tell the
+      // UI when it lands.
+      if (this.pollIntervalMs > 0) this._nextRetryAt = Date.now() + this.pollIntervalMs;
       this._recordError(e);
       // fetch throws TypeError on network failure; HTTP errors come back
       // as our own Error('... failed: HTTP xxx') messages.
@@ -342,18 +368,24 @@ export class SyncEngine {
     this._base = this._local;
     this.baseRev = rev;
     this._pending = this._remoteChanged = false;
+    this._lastError = undefined;
+    this._nextRetryAt = undefined;
     await this._persist();
     this._emitStatus();
     return 'saved';
   }
 
-  /** Push pending changes (if any) then pull — the online/interval cycle. */
+  /** Push pending changes (if any) then pull or detect — the online/interval cycle. */
   async _syncCycle(): Promise<void> {
     if (this._pending && !this._conflict) {
       const verdict = await this._push();
       if (verdict === 'queued') return; // still offline — skip the pull
     }
-    await this.pull();
+    if (this.eagerPull) {
+      await this.pull();
+    } else if (!this._syncing) {
+      try { await this._detect(); } catch (e) { this._recordError(e); }
+    }
   }
 
   _startWatchers(): void {
@@ -399,6 +431,8 @@ export class SyncEngine {
       remoteChanged: this._remoteChanged,
       conflict: this._conflict,
       conflictRemote: this._conflict ? this._conflictRemote : undefined,
+      // Retries are paused while parked — no point advertising a retry time.
+      nextRetryAt: this._conflict ? undefined : this._nextRetryAt,
       lastError: this._lastError
     };
   }
