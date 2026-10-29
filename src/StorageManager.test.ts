@@ -51,6 +51,13 @@ describe("StorageManager providers", () => {
     g.localStorage.setItem(StorageManager.PROVIDER_KEY, "dropbox");
     expect(new StorageManager(CONFIG).currentProvider.constructor.name).toBe("DropboxProvider");
   });
+
+  it("defaults to a configured provider when Google is absent", () => {
+    // Bug repro: _rememberedName falls back to 'gdrive', whose config block
+    // is missing → construction crashes for Dropbox/OneDrive-only apps.
+    const manager = new StorageManager({ dropbox: { appKey: "k" }, oneDrive: { clientId: "id" } });
+    expect(manager.providerName).toBe("dropbox");
+  });
 });
 
 describe("StorageManager.resumeAuth", () => {
@@ -84,6 +91,24 @@ describe("StorageManager.resumeAuth", () => {
     const verdict = await manager.resumeAuth(new URL("https://example.com/app/?code=c&state=onedrive:s"));
     expect(verdict).toBe(false);
     expect(manager.currentProvider).toBeInstanceOf(OneDriveProvider);
+  });
+
+  it("ignores a connect=<name> hint naming an unconfigured provider", async () => {
+    // Bug repro: a ?connect=gdrive deep link on a Dropbox/OneDrive-only app
+    // crashed the boot — resumeAuth switched to the hinted provider without
+    // checking its config block exists.
+    const manager = new StorageManager({ dropbox: { appKey: "k" }, oneDrive: { clientId: "id" } });
+    expect(await manager.resumeAuth(new URL("https://example.com/app/?connect=gdrive"))).toBe("none");
+    expect(manager.providerName).toBe("dropbox");
+  });
+
+  it("ignores a state prefix naming an unconfigured provider", async () => {
+    const manager = new StorageManager({ dropbox: { appKey: "k" } });
+    // state=onedrive:… cannot route to OneDrive without its config block;
+    // the error param is consumed by the active provider instead.
+    const verdict = await manager.resumeAuth(new URL("https://example.com/app/?error=access_denied&state=onedrive:s"));
+    expect(verdict).toBe(false);
+    expect(manager.providerName).toBe("dropbox");
   });
 });
 

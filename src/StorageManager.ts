@@ -43,16 +43,30 @@ export class StorageManager {
   }
 
   _rememberedName(): ProviderName {
+    // The remembered choice wins only when its config block is still there;
+    // otherwise fall back to the first configured provider (google keeps the
+    // historic default). With no provider at all, _createProvider reports it.
     const saved = localStorage.getItem(StorageManager.PROVIDER_KEY);
-    return saved === 'dropbox' || saved === 'onedrive' ? saved : 'gdrive';
+    if (saved === 'dropbox' && this._config.dropbox) return 'dropbox';
+    if (saved === 'onedrive' && this._config.oneDrive) return 'onedrive';
+    if (saved === 'gdrive' && this._config.google) return 'gdrive';
+    if (this._config.google) return 'gdrive';
+    if (this._config.dropbox) return 'dropbox';
+    if (this._config.oneDrive) return 'onedrive';
+    return 'gdrive';
   }
 
   _createProvider(name: ProviderName): StorageProvider {
     switch (name) {
-      case 'dropbox': return new DropboxProvider(this._config.dropbox!.appKey, this._config.fileName);
-      case 'onedrive': return new OneDriveProvider(this._config.oneDrive!.clientId, this._config.fileName);
+      case 'dropbox':
+        if (!this._config.dropbox) throw new Error('StorageManager: no dropbox config block');
+        return new DropboxProvider(this._config.dropbox.appKey, this._config.fileName);
+      case 'onedrive':
+        if (!this._config.oneDrive) throw new Error('StorageManager: no oneDrive config block');
+        return new OneDriveProvider(this._config.oneDrive.clientId, this._config.fileName);
       default: {
-        const google = this._config.google!;
+        const google = this._config.google;
+        if (!google) throw new Error('StorageManager: no google config block (at least one provider block is required)');
         return new GoogleDriveProvider(google.clientId, {
           fileName: this._config.fileName,
           appTag: google.appTag,
@@ -259,8 +273,11 @@ export class StorageManager {
       // Providers whose redirect URI cannot carry the connect marker
       // (OneDrive — Microsoft forbids query strings) prefix it into state.
       ?? url.searchParams.get('state')?.split(':')[0];
-    if (pending === 'gdrive' || pending === 'dropbox' || pending === 'onedrive') {
-      this.useProviderByName(pending);
+    // The hint is untrusted URL data: route only to providers that are
+    // actually configured — a connect=<name> deep link (or a forged state
+    // prefix) naming an absent provider must not crash the boot.
+    if (this.availableProviders().some(p => p.name === pending)) {
+      this.useProviderByName(pending as ProviderName);
     }
     const verdict = await this.currentProvider.resumeAuth(url);
     if (verdict === 'none') return 'none';
