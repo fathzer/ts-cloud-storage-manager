@@ -332,6 +332,32 @@ injects it with `useProvider()` for demo sessions.
 - **Google Drive**: GIS token client, `drive.file` scope + email. Redirect URIs
   are the JavaScript origins.
 
+**Not supported: pCloud** — a full provider was implemented and then
+removed: pCloud offers no browser-usable way to *download* file content.
+
+The OAuth side works fine (implicit grant — the code flow needs the client
+secret, unusable in a SPA; the fragment even reports the account's US/EU
+zone host). Uploads (`uploadfile`), metadata (`stat`) and `userinfo` all
+answer correctly on `api.pcloud.com`/`eapi.pcloud.com` with open CORS.
+But every documented read path is closed to web applications:
+
+- `getfilelink` rejects requests whose referer is not `pcloud.com`
+  (result 7010 "Invalid link referer") — the check also covers `Origin`,
+  which the browser always sends on CORS requests and which cannot be
+  removed (`referrerPolicy: 'no-referrer'` does not help);
+- the `fileops` family (`file_open`/`file_read`), which would read content
+  straight on the API host, answers 2003 "Access denied" under OAuth2
+  tokens — it is reserved for pCloud's own clients;
+- generated download links live on file hosts without open CORS (and are
+  bound to the requesting IP anyway).
+
+pCloud staff confirmed in
+[pcloud-sdk-js#4](https://github.com/pCloud/pcloud-sdk-js/issues/4) that
+downloading from web applications is not supported — the issue has been
+open since 2017 with an unchanged API. Worth revisiting only if pCloud
+opens one of these paths (PKCE + CORS-enabled downloads, or OAuth2-enabled
+fileops).
+
 ## Test
 
 ```sh

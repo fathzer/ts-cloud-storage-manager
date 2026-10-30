@@ -412,7 +412,10 @@ export class SyncEngine {
 
   _recordError(e: unknown): void {
     // An auth failure (token refresh dead) surfaces via the status channel:
-    // callers stop retrying rather than looping on a dead session.
+    // callers stop retrying rather than looping on a dead session. The full
+    // error is also logged — the status string alone is too terse to
+    // diagnose a provider failure.
+    console.error('SyncEngine error:', e);
     if (e instanceof Error) {
       this._lastError = e.message;
     } else if (typeof e === 'object' && e !== null) {
