@@ -61,9 +61,23 @@ inside its policy today.
 ## Install
 
 ```sh
-bun add github:fathzer/ts-cloud-storage-manager
-# or once published: bun add ts-cloud-storage-manager
+# Pin a release tag — recommended:
+bun add github:fathzer/ts-cloud-storage-manager#v0.0.1-preview
+# or once published on npm: bun add ts-cloud-storage-manager
 ```
+
+With a `github:` dependency, the **available versions are the repo's git
+tags** — browse them on the
+[releases page](https://github.com/fathzer/ts-cloud-storage-manager/releases)
+or list them with
+`git ls-remote --tags https://github.com/fathzer/ts-cloud-storage-manager`.
+Pin a tag (`#v0.0.1-preview`) for production; a branch (`#main`) or a
+commit sha also works, but a branch silently tracks every push.
+
+The `dist/` build output is not committed, so installation runs the
+package's `prepare` script (`tsc`). If your package manager blocks
+dependency lifecycle scripts, whitelist it (e.g. bun:
+`"trustedDependencies": ["ts-cloud-storage-manager"]`).
 
 No bundler is required: the package ships plain ES modules (`dist/`), so apps
 without a bundler can vendor `dist/` and import it with relative paths.
@@ -406,6 +420,43 @@ bun test          # unit tests (mocked fetch)
 bun run typecheck # tsc --noEmit + test tsconfig
 bun run build     # emits dist/ (js + d.ts)
 ```
+
+## Releasing — for maintainers
+
+Releases are cut with **`npm version`**, which bumps `package.json`,
+commits the bump and creates the tag in one atomic step — the version and
+its tag can never diverge by accident. Never edit `version` by hand and
+never create release tags manually.
+
+```sh
+# On the release branch, with a clean tree:
+npm version 0.0.1-preview        # → commit "0.0.1-preview" + tag v0.0.1-preview
+npm version patch                # → 0.0.2 + tag v0.0.2 (later releases)
+git push --follow-tags origin <branch>
+```
+
+Then:
+
+1. Open the PR to `main` and merge it **with a merge commit** (or let it
+   fast-forward). A squash/rebase merge leaves the tag pointing at an
+   orphan commit outside `main` — it still resolves, but the released
+   code is no longer what the tag names.
+2. Create the GitHub release on the existing tag (`v0.0.1-preview`) and
+   tick **pre-release** for `-preview` / `-alpha` / `-rc` versions.
+
+Consumers pin a tag
+(`github:fathzer/ts-cloud-storage-manager#v0.0.1-preview`), so the tag
+must be pushed before they can install. `npm version` prefixes tags with
+`v` by default — keep that prefix in dependency specs.
+
+### Safety net — `check-tag.yml`
+
+`.github/workflows/check-tag.yml` runs on every `v*` tag push, compares
+the tag (minus `v`) to `package.json#version`, and on a mismatch **fails
+the run and deletes the tag from GitHub** — a hand-made inconsistent tag
+cannot survive long enough to be pinned by an app. Deletion only touches
+the remote ref; clones that already fetched the tag keep it locally until
+they fetch again.
 
 ## License
 
