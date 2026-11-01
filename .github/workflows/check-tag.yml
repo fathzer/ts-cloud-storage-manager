@@ -1,0 +1,28 @@
+name: Check release tag
+
+# Safety net for manual tagging: every release tag (v*) must equal
+# package.json#version (minus the v prefix). Releases are normally cut
+# with `npm version`, which cannot diverge — a mismatch means someone
+# tagged by hand. The offending tag is deleted from GitHub so it cannot
+# be pinned by a consumer's `github:` dependency before being noticed.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  check-version:
+    permissions:
+      contents: write # required to delete the offending tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match package.json version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(node -p "require('./package.json').version")
+          if [ "$tag" != "$pkg" ]; then
+            git push origin ":refs/tags/${GITHUB_REF_NAME}"
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${pkg} — tag deleted. Cut releases with 'npm version', never by hand."
+            exit 1
+          fi
