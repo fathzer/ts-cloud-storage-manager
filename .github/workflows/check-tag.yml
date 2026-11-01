@@ -16,7 +16,7 @@ jobs:
       contents: write # required to delete the offending tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Tag must match package.json version
         run: |
           tag="${GITHUB_REF_NAME#v}"
