@@ -29,10 +29,10 @@ function mockFetch(handler: (url: string, init?: RequestInit) => Response): void
 
 /** A logged-in provider (tokens pre-stored, access token still valid). */
 function loggedInProvider(): OneDriveProvider {
-  g.localStorage!.setItem("od_refresh", "r");
-  g.localStorage!.setItem("od_access", "a");
-  g.localStorage!.setItem("od_expires", String(Date.now() + 3600_000));
-  return new OneDriveProvider(CLIENT_ID);
+  g.localStorage!.setItem("test.od_refresh", "r");
+  g.localStorage!.setItem("test.od_access", "a");
+  g.localStorage!.setItem("test.od_expires", String(Date.now() + 3600_000));
+  return new OneDriveProvider(NS, CLIENT_ID);
 }
 
 beforeEach(() => {
@@ -45,23 +45,24 @@ afterEach(() => {
 });
 
 const CLIENT_ID = "test-client-id";
+const NS = "test";
 const GRAPH = OneDriveProvider.GRAPH_URL;
 
 describe("OneDriveProvider.resumeAuth", () => {
   it("returns 'none' when the URL carries no OAuth parameter", async () => {
-    const provider = new OneDriveProvider(CLIENT_ID);
+    const provider = new OneDriveProvider(NS, CLIENT_ID);
     expect(await provider.resumeAuth(new URL("https://example.com/app/"))).toBe("none");
   });
 
   it("maps error=access_denied to the accessDenied failure", async () => {
-    const provider = new OneDriveProvider(CLIENT_ID);
+    const provider = new OneDriveProvider(NS, CLIENT_ID);
     const ok = await provider.resumeAuth(new URL("https://example.com/app/?error=access_denied&state=abc"));
     expect(ok).toBe(false);
     expect(provider.getAuthFailure()?.kind).toBe("accessDenied");
   });
 
   it("maps other errors to 'error' with the provider description as detail", async () => {
-    const provider = new OneDriveProvider(CLIENT_ID);
+    const provider = new OneDriveProvider(NS, CLIENT_ID);
     const ok = await provider.resumeAuth(new URL("https://example.com/app/?error=temporarily_unavailable&error_description=try+later"));
     expect(ok).toBe(false);
     expect(provider.getAuthFailure()?.kind).toBe("error");
@@ -69,19 +70,19 @@ describe("OneDriveProvider.resumeAuth", () => {
   });
 
   it("rejects a code whose state does not match the stored one", async () => {
-    g.sessionStorage!.setItem("od_state", "expected-state");
-    g.sessionStorage!.setItem("od_verifier", "verifier");
-    g.sessionStorage!.setItem("od_redirect_uri", "https://example.com/app/");
-    const provider = new OneDriveProvider(CLIENT_ID);
+    g.sessionStorage!.setItem("test.od_state", "expected-state");
+    g.sessionStorage!.setItem("test.od_verifier", "verifier");
+    g.sessionStorage!.setItem("test.od_redirect_uri", "https://example.com/app/");
+    const provider = new OneDriveProvider(NS, CLIENT_ID);
     const ok = await provider.resumeAuth(new URL("https://example.com/app/?code=abc&state=other"));
     expect(ok).toBe(false);
     expect(provider.getAuthFailure()?.kind).toBe("error");
   });
 
   it("exchanges the code, stores tokens and clears the pending request", async () => {
-    g.sessionStorage!.setItem("od_state", "the-state");
-    g.sessionStorage!.setItem("od_verifier", "the-verifier");
-    g.sessionStorage!.setItem("od_redirect_uri", "https://example.com/app/");
+    g.sessionStorage!.setItem("test.od_state", "the-state");
+    g.sessionStorage!.setItem("test.od_verifier", "the-verifier");
+    g.sessionStorage!.setItem("test.od_redirect_uri", "https://example.com/app/");
     mockFetch((url) => {
       if (url === OneDriveProvider.TOKEN_URL) {
         return new Response(JSON.stringify({
@@ -93,15 +94,15 @@ describe("OneDriveProvider.resumeAuth", () => {
       }
       return new Response("not found", { status: 404 });
     });
-    const provider = new OneDriveProvider(CLIENT_ID);
+    const provider = new OneDriveProvider(NS, CLIENT_ID);
     const ok = await provider.resumeAuth(new URL("https://example.com/app/?code=the-code&state=the-state"));
     expect(ok).toBe(true);
     expect(provider.getAuthFailure()).toBeNull();
     expect(provider.accessToken).toBe("access-1");
     expect(provider.refreshToken).toBe("refresh-1");
     expect(provider.userEmail).toBe("user@example.com");
-    expect(g.localStorage!.getItem("od_refresh")).toBe("refresh-1");
-    expect(g.sessionStorage!.getItem("od_state")).toBeNull();
+    expect(g.localStorage!.getItem("test.od_refresh")).toBe("refresh-1");
+    expect(g.sessionStorage!.getItem("test.od_state")).toBeNull();
 
     // The exchange used PKCE (verifier, not a secret) and the stored redirect URI.
     const body = String(calls[0].init?.body);
@@ -112,11 +113,11 @@ describe("OneDriveProvider.resumeAuth", () => {
   });
 
   it("fails the auth when the token exchange fails", async () => {
-    g.sessionStorage!.setItem("od_state", "s");
-    g.sessionStorage!.setItem("od_verifier", "v");
-    g.sessionStorage!.setItem("od_redirect_uri", "https://example.com/app/");
+    g.sessionStorage!.setItem("test.od_state", "s");
+    g.sessionStorage!.setItem("test.od_verifier", "v");
+    g.sessionStorage!.setItem("test.od_redirect_uri", "https://example.com/app/");
     mockFetch(() => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }));
-    const provider = new OneDriveProvider(CLIENT_ID);
+    const provider = new OneDriveProvider(NS, CLIENT_ID);
     const ok = await provider.resumeAuth(new URL("https://example.com/app/?code=c&state=s"));
     expect(ok).toBe(false);
     expect(provider.getAuthFailure()?.kind).toBe("error");
@@ -125,18 +126,25 @@ describe("OneDriveProvider.resumeAuth", () => {
 });
 
 describe("OneDriveProvider session", () => {
+  it("ignores a session stored under another namespace", async () => {
+    // Same-origin sibling app: its tokens must not leak into ours.
+    g.localStorage!.setItem("other.od_refresh", "r");
+    g.localStorage!.setItem("other.od_access", "a");
+    expect(await new OneDriveProvider(NS, CLIENT_ID).init()).toBe(false);
+  });
+
   it("init() reports a session only when a refresh token is stored", async () => {
-    expect(await new OneDriveProvider(CLIENT_ID).init()).toBe(false);
-    g.localStorage!.setItem("od_access", "a");
-    expect(await new OneDriveProvider(CLIENT_ID).init()).toBe(false);
-    g.localStorage!.setItem("od_refresh", "r");
-    expect(await new OneDriveProvider(CLIENT_ID).init()).toBe(true);
+    expect(await new OneDriveProvider(NS, CLIENT_ID).init()).toBe(false);
+    g.localStorage!.setItem("test.od_access", "a");
+    expect(await new OneDriveProvider(NS, CLIENT_ID).init()).toBe(false);
+    g.localStorage!.setItem("test.od_refresh", "r");
+    expect(await new OneDriveProvider(NS, CLIENT_ID).init()).toBe(true);
   });
 
   it("refreshes an expired access token lazily on the first API call", async () => {
-    g.localStorage!.setItem("od_refresh", "refresh-1");
-    g.localStorage!.setItem("od_access", "old-token");
-    g.localStorage!.setItem("od_expires", "1"); // long expired
+    g.localStorage!.setItem("test.od_refresh", "refresh-1");
+    g.localStorage!.setItem("test.od_access", "old-token");
+    g.localStorage!.setItem("test.od_expires", "1"); // long expired
     mockFetch((url) => {
       if (url === OneDriveProvider.TOKEN_URL) {
         // Microsoft rotates the refresh token on every use.
@@ -150,7 +158,7 @@ describe("OneDriveProvider session", () => {
       }
       return new Response("not found", { status: 404 });
     });
-    const provider = new OneDriveProvider(CLIENT_ID);
+    const provider = new OneDriveProvider(NS, CLIENT_ID);
     const remote = await provider.load();
     expect(remote?.data).toEqual({ items: [] });
     expect(remote?.rev).toBe("etag-1");
@@ -168,14 +176,14 @@ describe("OneDriveProvider session", () => {
   });
 
   it("disconnect() clears every stored credential", async () => {
-    g.localStorage!.setItem("od_refresh", "r");
-    g.localStorage!.setItem("od_access", "a");
-    g.localStorage!.setItem("od_user_email", "u@e.com");
-    const provider = new OneDriveProvider(CLIENT_ID);
+    g.localStorage!.setItem("test.od_refresh", "r");
+    g.localStorage!.setItem("test.od_access", "a");
+    g.localStorage!.setItem("test.od_user_email", "u@e.com");
+    const provider = new OneDriveProvider(NS, CLIENT_ID);
     await provider.disconnect();
-    expect(g.localStorage!.getItem("od_refresh")).toBeNull();
-    expect(g.localStorage!.getItem("od_access")).toBeNull();
-    expect(g.localStorage!.getItem("od_user_email")).toBeNull();
+    expect(g.localStorage!.getItem("test.od_refresh")).toBeNull();
+    expect(g.localStorage!.getItem("test.od_access")).toBeNull();
+    expect(g.localStorage!.getItem("test.od_user_email")).toBeNull();
     expect((await provider.getStatus()).isConnected).toBe(false);
   });
 });

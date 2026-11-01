@@ -63,6 +63,9 @@ export class GoogleDriveProvider extends StorageProvider {
   static readonly DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
   static readonly EMAIL_SCOPE = 'https://www.googleapis.com/auth/userinfo.email';
 
+  /** Storage namespace isolating this app's keys from other apps on the
+   *  same origin (see StorageConfig.namespace). */
+  namespace: string;
   clientId: string;
   fileName: string;
   /** appProperties tag identifying the data file (users may rename it). */
@@ -82,25 +85,32 @@ export class GoogleDriveProvider extends StorageProvider {
   confirmDialog?: (request: ConfirmDialogRequest) => Promise<boolean>;
 
   /**
+   * @param namespace the app storage namespace (see StorageConfig.namespace).
    * @param clientId the Google OAuth client id.
    * @param options file name, appProperties tag and the injectable
    *        confirmDialog hook.
    */
-  constructor(clientId: string, options: GoogleDriveOptions = {}) {
+  constructor(namespace: string, clientId: string, options: GoogleDriveOptions = {}) {
     super();
+    this.namespace = namespace;
     this.clientId = clientId;
     this.fileName = options.fileName ?? 'data.json';
     this.appTag = options.appTag ?? 'appdata';
     this.confirmDialog = options.confirmDialog;
-    this.accessToken = localStorage.getItem('gdrive_token') || null;
-    this.tokenExpiration = localStorage.getItem('gdrive_token_expiration') || null;
-    this.userEmail = localStorage.getItem('gdrive_user_email') || null;
+    this.accessToken = localStorage.getItem(this._key('gdrive_token')) || null;
+    this.tokenExpiration = localStorage.getItem(this._key('gdrive_token_expiration')) || null;
+    this.userEmail = localStorage.getItem(this._key('gdrive_user_email')) || null;
     this.tokenClient = null;
     this.fileId = null;
     this._fileNameCache = null;
     this._lastError = null;
     this._pendingAuthError = null;
     this._authFailure = null;
+  }
+
+  /** Full browser-storage key for a provider-owned entry. */
+  _key(name: string): string {
+    return `${this.namespace}.${name}`;
   }
 
   override getAuthFailure(): AuthFailure | null {
@@ -204,7 +214,7 @@ export class GoogleDriveProvider extends StorageProvider {
         const userInfo = await response.json() as { email?: string };
         if (userInfo.email) {
           this.userEmail = userInfo.email;
-          localStorage.setItem('gdrive_user_email', this.userEmail);
+          localStorage.setItem(this._key('gdrive_user_email'), this.userEmail);
         }
       }
     } catch (error) {
@@ -217,17 +227,17 @@ export class GoogleDriveProvider extends StorageProvider {
     this.tokenExpiration = null;
     this.userEmail = null;
     this._fileNameCache = null;
-    localStorage.removeItem('gdrive_token');
-    localStorage.removeItem('gdrive_token_expiration');
-    localStorage.removeItem('gdrive_user_email');
+    localStorage.removeItem(this._key('gdrive_token'));
+    localStorage.removeItem(this._key('gdrive_token_expiration'));
+    localStorage.removeItem(this._key('gdrive_user_email'));
     return Promise.resolve();
   }
 
   _saveToken(accessToken: string): void {
     this.accessToken = accessToken;
-    localStorage.setItem('gdrive_token', this.accessToken);
+    localStorage.setItem(this._key('gdrive_token'), this.accessToken);
     this.tokenExpiration = Date.now() + GoogleDriveProvider.TOKEN_EXPIRATION_MS;
-    localStorage.setItem('gdrive_token_expiration', String(this.tokenExpiration));
+    localStorage.setItem(this._key('gdrive_token_expiration'), String(this.tokenExpiration));
   }
 
   _isTokenExpired(): boolean {

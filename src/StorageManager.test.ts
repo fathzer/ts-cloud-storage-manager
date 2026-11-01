@@ -4,7 +4,7 @@ import { StorageManager } from "./StorageManager.js";
 import { DropboxProvider } from "./providers/DropboxProvider.js";
 import { OneDriveProvider } from "./providers/OneDriveProvider.js";
 import { ReadOnlyProvider } from "./providers/ReadOnlyProvider.js";
-import { MemoryStore } from "./sync/LocalStore.js";
+import { MemoryStore, IdbStore } from "./sync/LocalStore.js";
 import { UNRECONCILABLE } from "./sync/SyncEngine.js";
 
 // Bun has no DOM storage: install minimal in-memory shims before the
@@ -21,6 +21,7 @@ const g = globalThis as unknown as { localStorage: FakeStorage; sessionStorage: 
 const realFetch = globalThis.fetch;
 
 const CONFIG = {
+  namespace: "test",
   google: { clientId: "google-id" },
   dropbox: { appKey: "dropbox-key" },
   oneDrive: { clientId: "onedrive-id" }
@@ -42,20 +43,33 @@ describe("StorageManager providers", () => {
   });
 
   it("hides providers missing their credentials", () => {
-    const manager = new StorageManager({ google: { clientId: "google-id" } });
+    const manager = new StorageManager({ namespace: "test", google: { clientId: "google-id" } });
     expect(manager.availableProviders().map(p => p.name)).toEqual(["gdrive"]);
+  });
+
+  it("rejects a missing or blank namespace", () => {
+    // Web storage is shared per origin: an unprefixed app would collide
+    // with any sibling app served from the same origin.
+    expect(() => new StorageManager({ namespace: "", dropbox: { appKey: "k" } })).toThrow(/namespace/);
+    expect(() => new StorageManager({ namespace: "   ", dropbox: { appKey: "k" } })).toThrow(/namespace/);
   });
 
   it("defaults to Google Drive and remembers a picked provider", () => {
     expect(new StorageManager(CONFIG).currentProvider.constructor.name).toBe("GoogleDriveProvider");
-    g.localStorage.setItem(StorageManager.PROVIDER_KEY, "dropbox");
+    g.localStorage.setItem("test.provider", "dropbox");
     expect(new StorageManager(CONFIG).currentProvider.constructor.name).toBe("DropboxProvider");
+  });
+
+  it("ignores a provider remembered under another namespace", () => {
+    // Same-origin sibling app: its provider choice must not leak into ours.
+    g.localStorage.setItem("other.provider", "dropbox");
+    expect(new StorageManager(CONFIG).providerName).toBe("gdrive");
   });
 
   it("defaults to a configured provider when Google is absent", () => {
     // Bug repro: _rememberedName falls back to 'gdrive', whose config block
     // is missing → construction crashes for Dropbox/OneDrive-only apps.
-    const manager = new StorageManager({ dropbox: { appKey: "k" }, oneDrive: { clientId: "id" } });
+    const manager = new StorageManager({ namespace: "test", dropbox: { appKey: "k" }, oneDrive: { clientId: "id" } });
     expect(manager.providerName).toBe("dropbox");
   });
 });
@@ -67,14 +81,14 @@ describe("StorageManager.resumeAuth", () => {
   });
 
   it("routes the return URL to the pending redirect provider", async () => {
-    g.sessionStorage.setItem(StorageManager.PENDING_KEY, "dropbox");
+    g.sessionStorage.setItem("test.pending_provider", "dropbox");
     const manager = new StorageManager(CONFIG);
     // No stored dbx_state: the Dropbox provider rejects with a state mismatch.
     const verdict = await manager.resumeAuth(new URL("https://example.com/app/?code=c&state=s"));
     expect(verdict).toBe(false);
     expect(manager.currentProvider).toBeInstanceOf(DropboxProvider);
     expect(manager.currentProvider.getAuthFailure()?.kind).toBe("error");
-    expect(g.sessionStorage.getItem(StorageManager.PENDING_KEY)).toBeNull();
+    expect(g.sessionStorage.getItem("test.pending_provider")).toBeNull();
   });
 
   it("falls back on the connect=<name> value when no pending marker exists", async () => {
@@ -97,13 +111,13 @@ describe("StorageManager.resumeAuth", () => {
     // Bug repro: a ?connect=gdrive deep link on a Dropbox/OneDrive-only app
     // crashed the boot — resumeAuth switched to the hinted provider without
     // checking its config block exists.
-    const manager = new StorageManager({ dropbox: { appKey: "k" }, oneDrive: { clientId: "id" } });
+    const manager = new StorageManager({ namespace: "test", dropbox: { appKey: "k" }, oneDrive: { clientId: "id" } });
     expect(await manager.resumeAuth(new URL("https://example.com/app/?connect=gdrive"))).toBe("none");
     expect(manager.providerName).toBe("dropbox");
   });
 
   it("ignores a state prefix naming an unconfigured provider", async () => {
-    const manager = new StorageManager({ dropbox: { appKey: "k" } });
+    const manager = new StorageManager({ namespace: "test", dropbox: { appKey: "k" } });
     // state=onedrive:… cannot route to OneDrive without its config block;
     // the error param is consumed by the active provider instead.
     const verdict = await manager.resumeAuth(new URL("https://example.com/app/?error=access_denied&state=onedrive:s"));
@@ -129,6 +143,12 @@ describe("StorageManager sync lifecycle", () => {
     expect(engine.provider).toBe(manager.currentProvider);
     // Idempotent: same instance on a second call.
     expect(manager.enableSync(() => UNRECONCILABLE)).toBe(engine);
+  });
+
+  it("namespaces the default sync store with the config namespace", () => {
+    const manager = new StorageManager(CONFIG);
+    const engine = manager.enableSync(() => UNRECONCILABLE);
+    expect((engine.store as IdbStore)._dbName).toBe("test.cloud-sync");
   });
 
   it("re-wraps the engine on provider switch, pauses on read-only", async () => {

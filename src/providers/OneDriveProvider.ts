@@ -30,10 +30,11 @@ type ApiCall = () => Promise<Response>;
  * its promise never resolves; the verdict is read by resumeAuth() on the
  * return URL (?code= / ?error= + ?state=).
  *
- * Tokens live in localStorage (od_*). Microsoft rotates the refresh token on
- * every use — the new one is persisted each time. The data file is addressed
- * by its drive item id when known — the id survives renames (the app-folder
- * scope prevents moving it out of reach).
+ * Tokens live in localStorage under the app namespace (<ns>.od_*).
+ * Microsoft rotates the refresh token on every use — the new one is
+ * persisted each time. The data file is addressed by its drive item id
+ * when known — the id survives renames (the app-folder scope prevents
+ * moving it out of reach).
  *
  * Revision-aware contract: `rev` is the drive item eTag. save() sends it in
  * `if-match`; Microsoft answers 412 when the remote item changed — reported
@@ -48,6 +49,9 @@ export class OneDriveProvider extends StorageProvider {
   static readonly GRAPH_URL = 'https://graph.microsoft.com/v1.0';
   static readonly SCOPES = 'offline_access User.Read Files.ReadWrite.AppFolder';
 
+  /** Storage namespace isolating this app's keys from other apps on the
+   *  same origin (see StorageConfig.namespace). */
+  namespace: string;
   clientId: string;
   fileName: string;
   accessToken: string | null;
@@ -61,21 +65,28 @@ export class OneDriveProvider extends StorageProvider {
   _authFailure: AuthFailure | null;
 
   /**
+   * @param namespace the app storage namespace (see StorageConfig.namespace).
    * @param clientId the Entra application (client) id — "Single-page
    *        application" platform.
    * @param fileName name of the data file in the app folder.
    */
-  constructor(clientId: string, fileName = 'data.json') {
+  constructor(namespace: string, clientId: string, fileName = 'data.json') {
     super();
+    this.namespace = namespace;
     this.clientId = clientId;
     this.fileName = fileName;
-    this.accessToken = localStorage.getItem('od_access') || null;
-    this.tokenExpiration = Number(localStorage.getItem('od_expires')) || null;
-    this.refreshToken = localStorage.getItem('od_refresh') || null;
-    this.userEmail = localStorage.getItem('od_user_email') || null;
-    this.fileId = localStorage.getItem('od_file_id') || null;
-    this.resolvedName = localStorage.getItem('od_file_name') || null;
+    this.accessToken = localStorage.getItem(this._key('od_access')) || null;
+    this.tokenExpiration = Number(localStorage.getItem(this._key('od_expires'))) || null;
+    this.refreshToken = localStorage.getItem(this._key('od_refresh')) || null;
+    this.userEmail = localStorage.getItem(this._key('od_user_email')) || null;
+    this.fileId = localStorage.getItem(this._key('od_file_id')) || null;
+    this.resolvedName = localStorage.getItem(this._key('od_file_name')) || null;
     this._authFailure = null;
+  }
+
+  /** Full browser-storage key for a provider-owned entry. */
+  _key(name: string): string {
+    return `${this.namespace}.${name}`;
   }
 
   override readonly authResponseParams = ['code', 'state', 'error', 'error_description'];
@@ -104,9 +115,9 @@ export class OneDriveProvider extends StorageProvider {
     // echoed back verbatim (see StorageManager.resumeAuth).
     const state = `onedrive:${crypto.randomUUID()}`;
     const redirectUri = `${window.location.origin}${window.location.pathname}`;
-    sessionStorage.setItem('od_state', state);
-    sessionStorage.setItem('od_verifier', verifier);
-    sessionStorage.setItem('od_redirect_uri', redirectUri);
+    sessionStorage.setItem(this._key('od_state'), state);
+    sessionStorage.setItem(this._key('od_verifier'), verifier);
+    sessionStorage.setItem(this._key('od_redirect_uri'), redirectUri);
     const params = new URLSearchParams({
       client_id: this.clientId,
       redirect_uri: redirectUri,
@@ -135,9 +146,9 @@ export class OneDriveProvider extends StorageProvider {
       return false;
     }
 
-    const expectedState = sessionStorage.getItem('od_state');
-    const verifier = sessionStorage.getItem('od_verifier');
-    const redirectUri = sessionStorage.getItem('od_redirect_uri');
+    const expectedState = sessionStorage.getItem(this._key('od_state'));
+    const verifier = sessionStorage.getItem(this._key('od_verifier'));
+    const redirectUri = sessionStorage.getItem(this._key('od_redirect_uri'));
     this._clearAuthRequest();
     if (!expectedState || expectedState !== params.get('state') || !verifier || !redirectUri) {
       // Either a forged URL or a stale page (auth was started in another tab).
@@ -150,8 +161,8 @@ export class OneDriveProvider extends StorageProvider {
       // The account may have changed: the cached file id/name are no longer valid.
       this.fileId = null;
       this.resolvedName = null;
-      localStorage.removeItem('od_file_id');
-      localStorage.removeItem('od_file_name');
+      localStorage.removeItem(this._key('od_file_id'));
+      localStorage.removeItem(this._key('od_file_name'));
       this._authFailure = null;
       await this._fetchUserEmail();
       return true;
@@ -162,9 +173,9 @@ export class OneDriveProvider extends StorageProvider {
   }
 
   _clearAuthRequest(): void {
-    sessionStorage.removeItem('od_state');
-    sessionStorage.removeItem('od_verifier');
-    sessionStorage.removeItem('od_redirect_uri');
+    sessionStorage.removeItem(this._key('od_state'));
+    sessionStorage.removeItem(this._key('od_verifier'));
+    sessionStorage.removeItem(this._key('od_redirect_uri'));
   }
 
   async _exchangeCode(code: string, verifier: string, redirectUri: string): Promise<void> {
@@ -218,14 +229,14 @@ export class OneDriveProvider extends StorageProvider {
 
   _saveTokens(token: OneDriveTokenResponse): void {
     this.accessToken = token.access_token ?? null;
-    if (this.accessToken) localStorage.setItem('od_access', this.accessToken);
+    if (this.accessToken) localStorage.setItem(this._key('od_access'), this.accessToken);
     // Microsoft rotates the refresh token on every refresh: always persist it.
     if (token.refresh_token) {
       this.refreshToken = token.refresh_token;
-      localStorage.setItem('od_refresh', this.refreshToken);
+      localStorage.setItem(this._key('od_refresh'), this.refreshToken);
     }
     this.tokenExpiration = Date.now() + (token.expires_in ?? 3600) * 1000;
-    localStorage.setItem('od_expires', String(this.tokenExpiration));
+    localStorage.setItem(this._key('od_expires'), String(this.tokenExpiration));
   }
 
   _isTokenExpired(): boolean {
@@ -257,7 +268,7 @@ export class OneDriveProvider extends StorageProvider {
         const email = account.mail ?? account.userPrincipalName;
         if (email) {
           this.userEmail = email;
-          localStorage.setItem('od_user_email', this.userEmail);
+          localStorage.setItem(this._key('od_user_email'), this.userEmail);
         }
       }
     } catch (error) {
@@ -282,7 +293,7 @@ export class OneDriveProvider extends StorageProvider {
       if (this.fileId) {
         // The stored id is stale (file deleted, or account switched): retry by name.
         this.fileId = null;
-        localStorage.removeItem('od_file_id');
+        localStorage.removeItem(this._key('od_file_id'));
         return await this._tryDownload();
       }
       return null;
@@ -321,7 +332,7 @@ export class OneDriveProvider extends StorageProvider {
     if (res.status === 404 && this.fileId) {
       // The stored id is stale (file deleted, or account switched): retry by name.
       this.fileId = null;
-      localStorage.removeItem('od_file_id');
+      localStorage.removeItem(this._key('od_file_id'));
       return await this._fetchItemMetadata();
     }
     if (res.status === 404) return null;
@@ -336,7 +347,7 @@ export class OneDriveProvider extends StorageProvider {
     if (!res.ok && this.fileId) {
       // Writing by id failed (file deleted or account switched): retry by name.
       this.fileId = null;
-      localStorage.removeItem('od_file_id');
+      localStorage.removeItem(this._key('od_file_id'));
       res = await this._upload(this._itemPath(), content, baseRev);
       if (res.status === 412) return { status: 'conflict' };
     }
@@ -370,11 +381,11 @@ export class OneDriveProvider extends StorageProvider {
   _cacheFileInfo(meta: OneDriveItem): void {
     if (meta.id) {
       this.fileId = meta.id;
-      localStorage.setItem('od_file_id', meta.id);
+      localStorage.setItem(this._key('od_file_id'), meta.id);
     }
     if (meta.name) {
       this.resolvedName = meta.name;
-      localStorage.setItem('od_file_name', meta.name);
+      localStorage.setItem(this._key('od_file_name'), meta.name);
     }
   }
 
@@ -394,7 +405,7 @@ export class OneDriveProvider extends StorageProvider {
     this.fileId = null;
     this.resolvedName = null;
     for (const key of ['od_access', 'od_expires', 'od_refresh', 'od_user_email', 'od_file_id', 'od_file_name']) {
-      localStorage.removeItem(key);
+      localStorage.removeItem(this._key(key));
     }
   }
 

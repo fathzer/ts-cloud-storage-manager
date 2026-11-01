@@ -7,6 +7,16 @@ import type { MergePolicy, SyncEngineOptions } from './sync/SyncEngine.js';
  * then owns its whole lifecycle.
  */
 export interface StorageConfig {
+  /**
+   * Isolation prefix applied to every browser-storage entry the library
+   * persists (localStorage session keys, sessionStorage OAuth markers and
+   * the sync IndexedDB database). Required because web storage is scoped
+   * by origin — never by path: two apps sharing an origin (project pages
+   * on `*.github.io`, dev servers reusing a localhost port) would
+   * otherwise read, hijack and overwrite each other's sessions and sync
+   * state. Pick a short, stable, unique name per deployed application.
+   */
+  namespace: string;
   /** Name of the data file stored in the provider's app area. */
   fileName?: string;
   dropbox?: { appKey: string };

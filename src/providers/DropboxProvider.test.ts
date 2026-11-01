@@ -35,10 +35,10 @@ function apiArg(init?: RequestInit): Record<string, unknown> {
 
 /** A logged-in provider (tokens pre-stored, access token still valid). */
 function loggedInProvider(): DropboxProvider {
-  g.localStorage!.setItem("dbx_refresh", "r");
-  g.localStorage!.setItem("dbx_access", "a");
-  g.localStorage!.setItem("dbx_expires", String(Date.now() + 3600_000));
-  return new DropboxProvider(APP_KEY);
+  g.localStorage!.setItem("test.dbx_refresh", "r");
+  g.localStorage!.setItem("test.dbx_access", "a");
+  g.localStorage!.setItem("test.dbx_expires", String(Date.now() + 3600_000));
+  return new DropboxProvider(NS, APP_KEY);
 }
 
 beforeEach(() => {
@@ -51,22 +51,23 @@ afterEach(() => {
 });
 
 const APP_KEY = "test-app-key";
+const NS = "test";
 
 describe("DropboxProvider.resumeAuth", () => {
   it("returns 'none' when the URL carries no OAuth parameter", async () => {
-    const provider = new DropboxProvider(APP_KEY);
+    const provider = new DropboxProvider(NS, APP_KEY);
     expect(await provider.resumeAuth(new URL("https://example.com/app/"))).toBe("none");
   });
 
   it("maps error=access_denied to the accessDenied failure", async () => {
-    const provider = new DropboxProvider(APP_KEY);
+    const provider = new DropboxProvider(NS, APP_KEY);
     const ok = await provider.resumeAuth(new URL("https://example.com/app/?error=access_denied&state=abc"));
     expect(ok).toBe(false);
     expect(provider.getAuthFailure()?.kind).toBe("accessDenied");
   });
 
   it("maps other errors to 'error' with the provider description as detail", async () => {
-    const provider = new DropboxProvider(APP_KEY);
+    const provider = new DropboxProvider(NS, APP_KEY);
     const ok = await provider.resumeAuth(new URL("https://example.com/app/?error=temporarily_unavailable&error_description=try+later"));
     expect(ok).toBe(false);
     expect(provider.getAuthFailure()?.kind).toBe("error");
@@ -74,19 +75,19 @@ describe("DropboxProvider.resumeAuth", () => {
   });
 
   it("rejects a code whose state does not match the stored one", async () => {
-    g.sessionStorage!.setItem("dbx_state", "expected-state");
-    g.sessionStorage!.setItem("dbx_verifier", "verifier");
-    g.sessionStorage!.setItem("dbx_redirect_uri", "https://example.com/app/?connect=dropbox");
-    const provider = new DropboxProvider(APP_KEY);
+    g.sessionStorage!.setItem("test.dbx_state", "expected-state");
+    g.sessionStorage!.setItem("test.dbx_verifier", "verifier");
+    g.sessionStorage!.setItem("test.dbx_redirect_uri", "https://example.com/app/?connect=dropbox");
+    const provider = new DropboxProvider(NS, APP_KEY);
     const ok = await provider.resumeAuth(new URL("https://example.com/app/?connect=dropbox&code=abc&state=other"));
     expect(ok).toBe(false);
     expect(provider.getAuthFailure()?.kind).toBe("error");
   });
 
   it("exchanges the code, stores tokens and clears the pending request", async () => {
-    g.sessionStorage!.setItem("dbx_state", "the-state");
-    g.sessionStorage!.setItem("dbx_verifier", "the-verifier");
-    g.sessionStorage!.setItem("dbx_redirect_uri", "https://example.com/app/?connect=dropbox");
+    g.sessionStorage!.setItem("test.dbx_state", "the-state");
+    g.sessionStorage!.setItem("test.dbx_verifier", "the-verifier");
+    g.sessionStorage!.setItem("test.dbx_redirect_uri", "https://example.com/app/?connect=dropbox");
     mockFetch((url) => {
       if (url === DropboxProvider.TOKEN_URL) {
         return new Response(JSON.stringify({
@@ -98,15 +99,15 @@ describe("DropboxProvider.resumeAuth", () => {
       }
       return new Response("not found", { status: 404 });
     });
-    const provider = new DropboxProvider(APP_KEY);
+    const provider = new DropboxProvider(NS, APP_KEY);
     const ok = await provider.resumeAuth(new URL("https://example.com/app/?code=the-code&state=the-state"));
     expect(ok).toBe(true);
     expect(provider.getAuthFailure()).toBeNull();
     expect(provider.accessToken).toBe("access-1");
     expect(provider.refreshToken).toBe("refresh-1");
     expect(provider.userEmail).toBe("user@example.com");
-    expect(g.localStorage!.getItem("dbx_refresh")).toBe("refresh-1");
-    expect(g.sessionStorage!.getItem("dbx_state")).toBeNull();
+    expect(g.localStorage!.getItem("test.dbx_refresh")).toBe("refresh-1");
+    expect(g.sessionStorage!.getItem("test.dbx_state")).toBeNull();
 
     // The exchange used PKCE (verifier, not a secret) and the stored redirect URI.
     const body = String(calls[0].init?.body);
@@ -117,11 +118,11 @@ describe("DropboxProvider.resumeAuth", () => {
   });
 
   it("fails the auth when the token exchange fails", async () => {
-    g.sessionStorage!.setItem("dbx_state", "s");
-    g.sessionStorage!.setItem("dbx_verifier", "v");
-    g.sessionStorage!.setItem("dbx_redirect_uri", "https://example.com/app/?connect=dropbox");
+    g.sessionStorage!.setItem("test.dbx_state", "s");
+    g.sessionStorage!.setItem("test.dbx_verifier", "v");
+    g.sessionStorage!.setItem("test.dbx_redirect_uri", "https://example.com/app/?connect=dropbox");
     mockFetch(() => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }));
-    const provider = new DropboxProvider(APP_KEY);
+    const provider = new DropboxProvider(NS, APP_KEY);
     const ok = await provider.resumeAuth(new URL("https://example.com/app/?code=c&state=s"));
     expect(ok).toBe(false);
     expect(provider.getAuthFailure()?.kind).toBe("error");
@@ -130,18 +131,25 @@ describe("DropboxProvider.resumeAuth", () => {
 });
 
 describe("DropboxProvider session", () => {
+  it("ignores a session stored under another namespace", async () => {
+    // Same-origin sibling app: its tokens must not leak into ours.
+    g.localStorage!.setItem("other.dbx_refresh", "r");
+    g.localStorage!.setItem("other.dbx_access", "a");
+    expect(await new DropboxProvider(NS, APP_KEY).init()).toBe(false);
+  });
+
   it("init() reports a session only when a refresh token is stored", async () => {
-    expect(await new DropboxProvider(APP_KEY).init()).toBe(false);
-    g.localStorage!.setItem("dbx_access", "a");
-    expect(await new DropboxProvider(APP_KEY).init()).toBe(false);
-    g.localStorage!.setItem("dbx_refresh", "r");
-    expect(await new DropboxProvider(APP_KEY).init()).toBe(true);
+    expect(await new DropboxProvider(NS, APP_KEY).init()).toBe(false);
+    g.localStorage!.setItem("test.dbx_access", "a");
+    expect(await new DropboxProvider(NS, APP_KEY).init()).toBe(false);
+    g.localStorage!.setItem("test.dbx_refresh", "r");
+    expect(await new DropboxProvider(NS, APP_KEY).init()).toBe(true);
   });
 
   it("refreshes an expired access token lazily on the first API call", async () => {
-    g.localStorage!.setItem("dbx_refresh", "refresh-1");
-    g.localStorage!.setItem("dbx_access", "old-token");
-    g.localStorage!.setItem("dbx_expires", "1"); // long expired
+    g.localStorage!.setItem("test.dbx_refresh", "refresh-1");
+    g.localStorage!.setItem("test.dbx_access", "old-token");
+    g.localStorage!.setItem("test.dbx_expires", "1"); // long expired
     mockFetch((url) => {
       if (url === DropboxProvider.TOKEN_URL) {
         return new Response(JSON.stringify({ access_token: "fresh-token", expires_in: 14400 }), { status: 200 });
@@ -154,7 +162,7 @@ describe("DropboxProvider session", () => {
       }
       return new Response("not found", { status: 404 });
     });
-    const provider = new DropboxProvider(APP_KEY);
+    const provider = new DropboxProvider(NS, APP_KEY);
     const remote = await provider.load();
     expect(remote?.data).toEqual({ items: [] });
     expect(remote?.rev).toBe("rev-1");
@@ -171,15 +179,15 @@ describe("DropboxProvider session", () => {
   });
 
   it("disconnect() clears every stored credential", async () => {
-    g.localStorage!.setItem("dbx_refresh", "r");
-    g.localStorage!.setItem("dbx_access", "a");
-    g.localStorage!.setItem("dbx_user_email", "u@e.com");
+    g.localStorage!.setItem("test.dbx_refresh", "r");
+    g.localStorage!.setItem("test.dbx_access", "a");
+    g.localStorage!.setItem("test.dbx_user_email", "u@e.com");
     mockFetch(() => new Response("", { status: 200 }));
-    const provider = new DropboxProvider(APP_KEY);
+    const provider = new DropboxProvider(NS, APP_KEY);
     await provider.disconnect();
-    expect(g.localStorage!.getItem("dbx_refresh")).toBeNull();
-    expect(g.localStorage!.getItem("dbx_access")).toBeNull();
-    expect(g.localStorage!.getItem("dbx_user_email")).toBeNull();
+    expect(g.localStorage!.getItem("test.dbx_refresh")).toBeNull();
+    expect(g.localStorage!.getItem("test.dbx_access")).toBeNull();
+    expect(g.localStorage!.getItem("test.dbx_user_email")).toBeNull();
     expect((await provider.getStatus()).isConnected).toBe(false);
   });
 });

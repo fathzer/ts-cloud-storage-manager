@@ -28,6 +28,11 @@ file from several devices.
   file's *metadata only* (no content download): a lightweight primitive
   the app can poll — on `visibilitychange`, on a timer — to learn "the
   file changed elsewhere" before pulling anything.
+- **Same-origin isolation** — a required `namespace` prefixes every key the
+  library persists (localStorage sessions, sessionStorage OAuth markers,
+  the sync IndexedDB database), so sibling apps sharing an origin — two
+  project pages on `*.github.io`, two dev servers on the same localhost
+  port — can never read or overwrite each other's state as long their namespaces are different.
 - **Read-only demo mode** — `ReadOnlyProvider` serves a JSON file from a
   plain URL and silently drops saves.
 - **Offline-first sync** — `SyncEngine` keeps a durable local working copy
@@ -87,6 +92,7 @@ any member prefixed `_`.
 import { StorageManager } from 'ts-cloud-storage-manager';
 
 const storage = new StorageManager({
+  namespace: 'myapp',                      // required — see "Storage namespace"
   fileName: 'myapp_data.json',
   dropbox: { appKey: '…' },                // Dropbox app key (App folder access)
   oneDrive: { clientId: '…' },             // Entra application (client) id
@@ -103,7 +109,8 @@ const storage = new StorageManager({
     // pollIntervalMs: 60_000,             // visible-tab poll, 0 disables
     // eagerPull: false,                   // detect remote changes only —
     //                                     // adoption waits for pull()
-    // store: new IdbStore('myapp-sync'),  // IndexedDB by default
+    // store: new IdbStore('myapp-sync'),  // IndexedDB '<ns>.cloud-sync'
+    //                                     // by default
   },
 });
 
@@ -179,6 +186,39 @@ status (`conflictRemote`) so the resolution UI can show both sides, until
 whole-file app
 can pass a trivial policy; a granular app does its grain reconciliation
 inside it. `engine.reset()` purges base + outbox on disconnect.
+
+## Storage namespace
+
+Browser storage is scoped by **origin** (scheme + host + port) — never by
+path. Two apps served under `https://me.github.io/app-a` and
+`https://me.github.io/app-b`, or two dev servers taking turns on
+`localhost:5500`, share one localStorage, one sessionStorage and one
+IndexedDB. Without isolation they would hijack each other: an app can
+pick up — then destroy — another app's session (a refresh token is only
+valid for the OAuth client that issued it), read and overwrite the other
+app's cloud file through a cached file id, or push foreign data into its
+own remote file through a shared sync outbox.
+
+`StorageConfig.namespace` is therefore **required** and prefixes
+everything the library persists:
+
+| Store | Keys |
+|---|---|
+| localStorage | `<ns>.provider`, `<ns>.dbx_*`, `<ns>.od_*`, `<ns>.gdrive_*` |
+| sessionStorage | `<ns>.pending_provider`, `<ns>.dbx_state` / `dbx_verifier` / `dbx_redirect_uri`, `<ns>.od_state` / `od_verifier` / `od_redirect_uri` |
+| IndexedDB | database `<ns>.cloud-sync` (store `state`) |
+
+Pick one short, stable, unique string per deployed application
+(`'myapp'`). Two unrelated apps must never share a namespace. Changing it
+later orphans the previous data exactly like a fresh install: users
+reconnect, and local edits not yet pushed are left behind in the old
+namespace.
+
+> **Migration from pre-namespace versions** — earlier releases wrote
+> unprefixed keys (`mp_provider`, `dbx_*`, `od_*`, `gdrive_*`) and the
+> `cloud-sync` database. Those entries are now ignored: existing users
+> reconnect once, and edits still queued in the old database are not
+> migrated. Delete them manually if you want a clean devtools view.
 
 ## How it works
 

@@ -28,10 +28,11 @@ type ApiCall = () => Promise<Response>;
  * its promise never resolves; the verdict is read by resumeAuth() on the
  * return URL (?code= / ?error= + ?state=).
  *
- * Tokens live in localStorage (dbx_*): the refresh token never expires until
- * revoked, which gives a "connected forever" experience. The data file is
- * addressed by its Dropbox file id when known — the id survives renames
- * (the app-folder scope prevents moving it out).
+ * Tokens live in localStorage under the app namespace (<ns>.dbx_*): the
+ * refresh token never expires until revoked, which gives a "connected
+ * forever" experience. The data file is addressed by its Dropbox file id
+ * when known — the id survives renames (the app-folder scope prevents
+ * moving it out).
  *
  * Revision-aware contract: `rev` is Dropbox's file rev. save() uploads with
  * mode update:<baseRev>, which Dropbox answers 409 path/conflict when the
@@ -43,6 +44,9 @@ export class DropboxProvider extends StorageProvider {
   static readonly API_URL = 'https://api.dropboxapi.com/2';
   static readonly CONTENT_URL = 'https://content.dropboxapi.com/2';
 
+  /** Storage namespace isolating this app's keys from other apps on the
+   *  same origin (see StorageConfig.namespace). */
+  namespace: string;
   appKey: string;
   fileName: string;
   accessToken: string | null;
@@ -57,20 +61,27 @@ export class DropboxProvider extends StorageProvider {
   _authFailure: AuthFailure | null;
 
   /**
+   * @param namespace the app storage namespace (see StorageConfig.namespace).
    * @param appKey the Dropbox app key (App folder access).
    * @param fileName name of the data file in the app folder.
    */
-  constructor(appKey: string, fileName = 'data.json') {
+  constructor(namespace: string, appKey: string, fileName = 'data.json') {
     super();
+    this.namespace = namespace;
     this.appKey = appKey;
     this.fileName = fileName;
-    this.accessToken = localStorage.getItem('dbx_access') || null;
-    this.tokenExpiration = Number(localStorage.getItem('dbx_expires')) || null;
-    this.refreshToken = localStorage.getItem('dbx_refresh') || null;
-    this.userEmail = localStorage.getItem('dbx_user_email') || null;
-    this.fileId = localStorage.getItem('dbx_file_id') || null;
-    this.resolvedName = localStorage.getItem('dbx_file_name') || null;
+    this.accessToken = localStorage.getItem(this._key('dbx_access')) || null;
+    this.tokenExpiration = Number(localStorage.getItem(this._key('dbx_expires'))) || null;
+    this.refreshToken = localStorage.getItem(this._key('dbx_refresh')) || null;
+    this.userEmail = localStorage.getItem(this._key('dbx_user_email')) || null;
+    this.fileId = localStorage.getItem(this._key('dbx_file_id')) || null;
+    this.resolvedName = localStorage.getItem(this._key('dbx_file_name')) || null;
     this._authFailure = null;
+  }
+
+  /** Full browser-storage key for a provider-owned entry. */
+  _key(name: string): string {
+    return `${this.namespace}.${name}`;
   }
 
   override readonly authResponseParams = ['code', 'state', 'error', 'error_description'];
@@ -99,9 +110,9 @@ export class DropboxProvider extends StorageProvider {
     // the way back it tells the app which provider owns the returned params
     // while remaining a plain "start Dropbox auth" deep link otherwise.
     const redirectUri = `${window.location.origin}${window.location.pathname}?connect=dropbox`;
-    sessionStorage.setItem('dbx_state', state);
-    sessionStorage.setItem('dbx_verifier', verifier);
-    sessionStorage.setItem('dbx_redirect_uri', redirectUri);
+    sessionStorage.setItem(this._key('dbx_state'), state);
+    sessionStorage.setItem(this._key('dbx_verifier'), verifier);
+    sessionStorage.setItem(this._key('dbx_redirect_uri'), redirectUri);
     const params = new URLSearchParams({
       client_id: this.appKey,
       redirect_uri: redirectUri,
@@ -129,9 +140,9 @@ export class DropboxProvider extends StorageProvider {
       return false;
     }
 
-    const expectedState = sessionStorage.getItem('dbx_state');
-    const verifier = sessionStorage.getItem('dbx_verifier');
-    const redirectUri = sessionStorage.getItem('dbx_redirect_uri');
+    const expectedState = sessionStorage.getItem(this._key('dbx_state'));
+    const verifier = sessionStorage.getItem(this._key('dbx_verifier'));
+    const redirectUri = sessionStorage.getItem(this._key('dbx_redirect_uri'));
     this._clearAuthRequest();
     if (!expectedState || expectedState !== params.get('state') || !verifier || !redirectUri) {
       // Either a forged URL or a stale page (auth was started in another tab).
@@ -144,8 +155,8 @@ export class DropboxProvider extends StorageProvider {
       // The account may have changed: the cached file id/name are no longer valid.
       this.fileId = null;
       this.resolvedName = null;
-      localStorage.removeItem('dbx_file_id');
-      localStorage.removeItem('dbx_file_name');
+      localStorage.removeItem(this._key('dbx_file_id'));
+      localStorage.removeItem(this._key('dbx_file_name'));
       this._authFailure = null;
       await this._fetchUserEmail();
       return true;
@@ -156,9 +167,9 @@ export class DropboxProvider extends StorageProvider {
   }
 
   _clearAuthRequest(): void {
-    sessionStorage.removeItem('dbx_state');
-    sessionStorage.removeItem('dbx_verifier');
-    sessionStorage.removeItem('dbx_redirect_uri');
+    sessionStorage.removeItem(this._key('dbx_state'));
+    sessionStorage.removeItem(this._key('dbx_verifier'));
+    sessionStorage.removeItem(this._key('dbx_redirect_uri'));
   }
 
   async _exchangeCode(code: string, verifier: string, redirectUri: string): Promise<void> {
@@ -210,14 +221,14 @@ export class DropboxProvider extends StorageProvider {
 
   _saveTokens(token: DropboxTokenResponse): void {
     this.accessToken = token.access_token ?? null;
-    if (this.accessToken) localStorage.setItem('dbx_access', this.accessToken);
+    if (this.accessToken) localStorage.setItem(this._key('dbx_access'), this.accessToken);
     // Refresh tokens are not rotated by Dropbox, but keep it if one is sent.
     if (token.refresh_token) {
       this.refreshToken = token.refresh_token;
-      localStorage.setItem('dbx_refresh', this.refreshToken);
+      localStorage.setItem(this._key('dbx_refresh'), this.refreshToken);
     }
     this.tokenExpiration = Date.now() + (token.expires_in ?? 14400) * 1000;
-    localStorage.setItem('dbx_expires', String(this.tokenExpiration));
+    localStorage.setItem(this._key('dbx_expires'), String(this.tokenExpiration));
   }
 
   _isTokenExpired(): boolean {
@@ -257,7 +268,7 @@ export class DropboxProvider extends StorageProvider {
         const account = await res.json() as { email?: string };
         if (account.email) {
           this.userEmail = account.email;
-          localStorage.setItem('dbx_user_email', this.userEmail);
+          localStorage.setItem(this._key('dbx_user_email'), this.userEmail);
         }
       }
     } catch (error) {
@@ -302,7 +313,7 @@ export class DropboxProvider extends StorageProvider {
       if (this.fileId) {
         // The stored id is stale (file deleted, or account switched): retry by name.
         this.fileId = null;
-        localStorage.removeItem('dbx_file_id');
+        localStorage.removeItem(this._key('dbx_file_id'));
         return await this._tryDownload();
       }
       return null;
@@ -339,7 +350,7 @@ export class DropboxProvider extends StorageProvider {
       if (this.fileId) {
         // Writing by id failed (file deleted or account switched): retry by name.
         this.fileId = null;
-        localStorage.removeItem('dbx_file_id');
+        localStorage.removeItem(this._key('dbx_file_id'));
         res = await this._upload(`/${this.fileName}`, content, baseRev);
         if (!res.ok && await this._pathErrorTag(res) === 'conflict') return { status: 'conflict' };
       }
@@ -372,7 +383,7 @@ export class DropboxProvider extends StorageProvider {
       if (!this.fileId) return null;
       // The stored id is stale (file deleted, or account switched): retry by name.
       this.fileId = null;
-      localStorage.removeItem('dbx_file_id');
+      localStorage.removeItem(this._key('dbx_file_id'));
       res = await this._api('files/get_metadata', { path: `/${this.fileName}` });
       if (!res.ok && await this._isNotFound(res)) return null;
     }
@@ -385,11 +396,11 @@ export class DropboxProvider extends StorageProvider {
   _cacheFileInfo(meta: DropboxFileMetadata): void {
     if (meta.id) {
       this.fileId = meta.id;
-      localStorage.setItem('dbx_file_id', meta.id);
+      localStorage.setItem(this._key('dbx_file_id'), meta.id);
     }
     if (meta.name) {
       this.resolvedName = meta.name;
-      localStorage.setItem('dbx_file_name', meta.name);
+      localStorage.setItem(this._key('dbx_file_name'), meta.name);
     }
   }
 
@@ -417,7 +428,7 @@ export class DropboxProvider extends StorageProvider {
     this.fileId = null;
     this.resolvedName = null;
     for (const key of ['dbx_access', 'dbx_expires', 'dbx_refresh', 'dbx_user_email', 'dbx_file_id', 'dbx_file_name']) {
-      localStorage.removeItem(key);
+      localStorage.removeItem(this._key(key));
     }
   }
 

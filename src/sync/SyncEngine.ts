@@ -21,7 +21,9 @@ export type MergePolicy = (ctx: {
 
 /** Tuning knobs of a SyncEngine (constructor / StorageConfig.sync). */
 export interface SyncEngineOptions {
-  /** LocalStore implementation — defaults to IndexedDB (cloud-sync db). */
+  /** LocalStore implementation — defaults to IndexedDB (StorageManager
+   *  supplies a namespace-derived database name; a directly constructed
+   *  engine falls back to 'cloud-sync'). */
   store?: LocalStore;
   /** Metadata polling interval while the tab is visible; 0 disables (default 60 s). */
   pollIntervalMs?: number;

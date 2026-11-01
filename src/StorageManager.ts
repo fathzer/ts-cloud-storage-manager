@@ -2,6 +2,7 @@ import { GoogleDriveProvider } from './providers/GoogleDriveProvider.js';
 import { DropboxProvider } from './providers/DropboxProvider.js';
 import { OneDriveProvider } from './providers/OneDriveProvider.js';
 import { SyncEngine, UNRECONCILABLE } from './sync/SyncEngine.js';
+import { IdbStore } from './sync/LocalStore.js';
 import type { StorageProvider, StorageStatus, RemoteData, SaveResult } from './StorageProvider.js';
 import type { StorageConfig } from './config.js';
 import type { MergePolicy, SyncEngineOptions, SaveVerdict, SyncStatus } from './sync/SyncEngine.js';
@@ -10,15 +11,18 @@ import type { MergePolicy, SyncEngineOptions, SaveVerdict, SyncStatus } from './
 export type ProviderName = 'gdrive' | 'dropbox' | 'onedrive';
 
 export class StorageManager {
-  /** localStorage key remembering which provider holds the account session. */
-  static readonly PROVIDER_KEY = 'mp_provider';
-  /** sessionStorage key set while a redirect OAuth flow is in flight — on the
-   *  return URL it tells which provider must consume the OAuth parameters. */
-  static readonly PENDING_KEY = 'mp_pending_provider';
+  /** localStorage key (inside the namespace) remembering which provider
+   *  holds the account session. */
+  static readonly PROVIDER_STEM = 'provider';
+  /** sessionStorage key (inside the namespace) set while a redirect OAuth
+   *  flow is in flight — on the return URL it tells which provider must
+   *  consume the OAuth parameters. */
+  static readonly PENDING_STEM = 'pending_provider';
 
   currentProvider: StorageProvider;
   _defaultProvider: StorageProvider;
   _config: StorageConfig;
+  _namespace: string;
   _currentName: ProviderName;
   _engine: SyncEngine | null = null;
 
@@ -34,19 +38,30 @@ export class StorageManager {
    * @param config provider-specific blocks; a provider is offered only when
    *        its block is present. fileName applies to every provider.
    */
-  constructor(config: StorageConfig = {}) {
+  constructor(config: StorageConfig) {
+    if (!config.namespace?.trim()) {
+      throw new Error('StorageManager: config.namespace is required — it isolates ' +
+        'this app\'s storage (sessions, sync state) from other apps on the same origin');
+    }
     this._config = config;
+    this._namespace = config.namespace;
     this._currentName = this._rememberedName();
     this._defaultProvider = this._createProvider(this._currentName);
     this.currentProvider = this._defaultProvider;
     if (config.sync) this.enableSync(config.sync.policy ?? (() => UNRECONCILABLE), config.sync);
   }
 
+  /** Full browser-storage key for a library-owned entry — every persisted
+   *  key lives under the configured namespace. */
+  _key(name: string): string {
+    return `${this._namespace}.${name}`;
+  }
+
   _rememberedName(): ProviderName {
     // The remembered choice wins only when its config block is still there;
     // otherwise fall back to the first configured provider (google keeps the
     // historic default). With no provider at all, _createProvider reports it.
-    const saved = localStorage.getItem(StorageManager.PROVIDER_KEY);
+    const saved = localStorage.getItem(this._key(StorageManager.PROVIDER_STEM));
     if (saved === 'dropbox' && this._config.dropbox) return 'dropbox';
     if (saved === 'onedrive' && this._config.oneDrive) return 'onedrive';
     if (saved === 'gdrive' && this._config.google) return 'gdrive';
@@ -60,14 +75,14 @@ export class StorageManager {
     switch (name) {
       case 'dropbox':
         if (!this._config.dropbox) throw new Error('StorageManager: no dropbox config block');
-        return new DropboxProvider(this._config.dropbox.appKey, this._config.fileName);
+        return new DropboxProvider(this._namespace, this._config.dropbox.appKey, this._config.fileName);
       case 'onedrive':
         if (!this._config.oneDrive) throw new Error('StorageManager: no oneDrive config block');
-        return new OneDriveProvider(this._config.oneDrive.clientId, this._config.fileName);
+        return new OneDriveProvider(this._namespace, this._config.oneDrive.clientId, this._config.fileName);
       default: {
         const google = this._config.google;
         if (!google) throw new Error('StorageManager: no google config block (at least one provider block is required)');
-        return new GoogleDriveProvider(google.clientId, {
+        return new GoogleDriveProvider(this._namespace, google.clientId, {
           fileName: this._config.fileName,
           appTag: google.appTag,
           confirmDialog: google.confirmDialog
@@ -100,7 +115,10 @@ export class StorageManager {
    * @returns the managed SyncEngine — subscribe/save through it.
    */
   enableSync(policy: MergePolicy = () => UNRECONCILABLE, options: SyncEngineOptions = {}): SyncEngine {
-    this._engine ??= new SyncEngine(this.currentProvider, policy, options);
+    this._engine ??= new SyncEngine(this.currentProvider, policy, {
+      ...options,
+      store: options.store ?? new IdbStore(this._key('cloud-sync'))
+    });
     return this._engine;
   }
 
@@ -247,9 +265,9 @@ export class StorageManager {
     // the flow lets resumeAuth() route the return URL to it. A popup-flow
     // provider clears any stale marker left by an abandoned redirect.
     if (this.currentProvider.authResponseParams.length > 0) {
-      sessionStorage.setItem(StorageManager.PENDING_KEY, this._currentName);
+      sessionStorage.setItem(this._key(StorageManager.PENDING_STEM), this._currentName);
     } else {
-      sessionStorage.removeItem(StorageManager.PENDING_KEY);
+      sessionStorage.removeItem(this._key(StorageManager.PENDING_STEM));
     }
     const ok = await this.currentProvider.authenticate();
     if (ok) {
@@ -268,7 +286,7 @@ export class StorageManager {
    *          return parameters.
    */
   async resumeAuth(url: URL): Promise<boolean | 'none'> {
-    const pending = sessionStorage.getItem(StorageManager.PENDING_KEY)
+    const pending = sessionStorage.getItem(this._key(StorageManager.PENDING_STEM))
       ?? url.searchParams.get('connect')
       // Providers whose redirect URI cannot carry the connect marker
       // (OneDrive — Microsoft forbids query strings) prefix it into state.
@@ -281,13 +299,13 @@ export class StorageManager {
     }
     const verdict = await this.currentProvider.resumeAuth(url);
     if (verdict === 'none') return 'none';
-    sessionStorage.removeItem(StorageManager.PENDING_KEY);
+    sessionStorage.removeItem(this._key(StorageManager.PENDING_STEM));
     if (verdict) this._rememberName();
     return verdict;
   }
 
   _rememberName(): void {
-    localStorage.setItem(StorageManager.PROVIDER_KEY, this._currentName);
+    localStorage.setItem(this._key(StorageManager.PROVIDER_STEM), this._currentName);
   }
 
   /**
