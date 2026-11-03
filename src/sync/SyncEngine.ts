@@ -1,4 +1,4 @@
-import type { StorageProvider } from '../StorageProvider.js';
+import type { StorageProvider, RemoteData } from '../StorageProvider.js';
 import { IdbStore } from './LocalStore.js';
 import type { LocalStore } from './LocalStore.js';
 
@@ -8,16 +8,26 @@ import type { LocalStore } from './LocalStore.js';
  */
 export const UNRECONCILABLE = 'unreconcilable';
 
+/** Context handed to the app's merge function. */
+export interface MergeContext {
+  /** Last-synced snapshot (null when `persistBase` is disabled). */
+  base: unknown;
+  /** The remote revision the local state last synced with. */
+  baseRev: string | null;
+  local: unknown;
+  remote: unknown;
+  /** The revision of the remote data in this context. */
+  remoteRev: string | null;
+}
+
 /**
  * Application-supplied merge policy — the only piece knowing the shape of a
  * "grain". Called with the last-synced base, the local working copy and the
- * freshly downloaded remote data. Returns the reconciled data, or
- * UNRECONCILABLE when the conflict needs a user decision. A whole-file app
- * can pass `() => UNRECONCILABLE`.
+ * freshly downloaded remote data (plus their revisions). Returns the
+ * reconciled data, or UNRECONCILABLE when the conflict needs a user
+ * decision. A whole-file app can pass `() => UNRECONCILABLE`.
  */
-export type MergePolicy = (ctx: {
-  base: unknown; local: unknown; remote: unknown;
-}) => unknown;
+export type MergePolicy = (ctx: MergeContext) => unknown;
 
 /** Tuning knobs of a SyncEngine (constructor / StorageConfig.sync). */
 export interface SyncEngineOptions {
@@ -33,6 +43,23 @@ export interface SyncEngineOptions {
    * "new version available" button. Default true.
    */
   eagerPull?: boolean;
+  /**
+   * When false, the last-synced base snapshot is neither persisted nor
+   * handed to the merge policy (ctx.base === null) — for policies that
+   * reconcile through per-grain rev markers instead of base comparisons.
+   * Default true.
+   */
+  persistBase?: boolean;
+  /**
+   * Normalizes a remote payload the engine adopts wholesale (init, clean
+   * pull, 'remote' conflict resolution) — the place to stamp per-grain rev
+   * markers and clear dirty/tombstone bookkeeping that only makes sense for
+   * the writer. Merged data is never routed through it, and neither is data
+   * the app saved itself: the policy must keep that bookkeeping coherent.
+   * Its return value is used as is (even null); it should not mutate its
+   * input. Default: identity.
+   */
+  adopt?: (data: unknown, rev: string | null) => unknown;
 }
 
 export type SaveVerdict = 'saved' | 'queued' | 'conflict' | 'error';
@@ -72,6 +99,8 @@ export class SyncEngine {
   store: LocalStore;
   pollIntervalMs: number;
   eagerPull: boolean;
+  persistBase: boolean;
+  adopt: (data: unknown, rev: string | null) => unknown;
 
   baseRev: string | null = null;
   _base: unknown = null;
@@ -86,7 +115,7 @@ export class SyncEngine {
   _watching = false;
   _timer: ReturnType<typeof setInterval> | null = null;
   _statusCbs = new Set<(s: SyncStatus) => void>();
-  _dataCbs = new Set<(data: unknown) => void>();
+  _dataCbs = new Set<(data: unknown, rev: string | null) => void>();
   _onOnline = () => { void this._syncCycle(); };
   _onVisibility = () => { if (!document.hidden) void this.pull(); };
 
@@ -102,6 +131,24 @@ export class SyncEngine {
     this.store = options.store ?? new IdbStore();
     this.pollIntervalMs = options.pollIntervalMs ?? 60_000;
     this.eagerPull = options.eagerPull !== false;
+    this.persistBase = options.persistBase !== false;
+    this.adopt = options.adopt ?? (data => data);
+  }
+
+  /** Detached copy kept as the merge base — null when the base is not
+   *  persisted — so in-place edits of the working copy never leak into it. */
+  _snapshot(data: unknown): unknown {
+    return this.persistBase && data != null ? structuredClone(data) : null;
+  }
+
+  _ctx(remoteData: unknown, remoteRev: string | null): MergeContext {
+    return {
+      base: this.persistBase ? this._base : null,
+      baseRev: this.baseRev,
+      local: this._local,
+      remote: remoteData,
+      remoteRev
+    };
   }
 
   /**
@@ -111,7 +158,8 @@ export class SyncEngine {
    * @returns the local working copy to render.
    */
   async init(): Promise<unknown> {
-    this._base = await this.store.get(SyncEngine.K_BASE) ?? null;
+    if (this.persistBase) this._base = await this.store.get(SyncEngine.K_BASE) ?? null;
+    else await this.store.delete(SyncEngine.K_BASE);
     this.baseRev = (await this.store.get(SyncEngine.K_BASE_REV) as string | null) ?? null;
     this._local = await this.store.get(SyncEngine.K_LOCAL) ?? null;
     this._pending = (await this.store.get(SyncEngine.K_PENDING) as boolean) ?? false;
@@ -119,9 +167,9 @@ export class SyncEngine {
     if (!this._pending) {
       try {
         const remote = await this.provider.load();
-        this._base = remote?.data ?? null;
+        this._local = remote ? this.adopt(remote.data, remote.rev) : null;
+        this._base = this._snapshot(this._local);
         this.baseRev = remote?.rev ?? null;
-        this._local = this._base;
         await this._persist();
       } catch (e) {
         // Offline or auth failure: keep whatever local state we have —
@@ -153,10 +201,11 @@ export class SyncEngine {
 
   /**
    * Fired when the working copy is replaced by a merge/pull — re-render.
-   * @param cb receives the new working copy.
+   * @param cb receives the new working copy and the revision it syncs at
+   *          (the current baseRev).
    * @returns an unsubscribe function.
    */
-  onData(cb: (data: unknown) => void): () => void {
+  onData(cb: (data: unknown, rev: string | null) => void): () => void {
     this._dataCbs.add(cb);
     return () => this._dataCbs.delete(cb);
   }
@@ -193,7 +242,7 @@ export class SyncEngine {
       const remoteData = remote?.data ?? null;
       if (!this._pending) {
         // Clean local (or remotely deleted file): remote wins wholesale.
-        await this._adopt(remoteData, remote?.rev ?? null);
+        await this._adopt(remote ? this.adopt(remoteData, remote.rev) : null, remote?.rev ?? null);
         return;
       }
       if (!remote) {
@@ -203,15 +252,22 @@ export class SyncEngine {
         return;
       }
       // Both moved: policy decides.
-      const merged = this.policy({ base: this._base, local: this._local, remote: remoteData });
+      const merged = this.policy(this._ctx(remoteData, remote.rev));
       if (merged === UNRECONCILABLE) {
         this._conflict = true;
         this._conflictRemote = remoteData;
         this._emitStatus();
         return;
       }
-      await this._adopt(merged, remote.rev);
-      // The merge may still differ from remote — it gets pushed on next save.
+      // The remote head becomes the base (what the next merge compares
+      // against); the merged result stays pending and is pushed on next save.
+      this._base = this._snapshot(remoteData);
+      this.baseRev = remote.rev;
+      this._local = merged;
+      this._remoteChanged = false;
+      await this._persist();
+      this._emitData();
+      this._emitStatus();
     } catch (e) {
       this._recordError(e);
     }
@@ -235,7 +291,7 @@ export class SyncEngine {
 
   /** Adopts remote data as base + working copy after a pull. */
   async _adopt(data: unknown, rev: string | null): Promise<void> {
-    this._base = data;
+    this._base = this._snapshot(data);
     this.baseRev = rev;
     this._local = data;
     this._remoteChanged = false;
@@ -253,16 +309,28 @@ export class SyncEngine {
    * guarded on the current remote head and may conflict anew if it moved.
    * @param resolution 'local' | 'remote' | {merged: data}.
    * @returns the verdict of the resolution push ('saved' | 'conflict' |
-   *          'queued' | 'error').
+   *          'queued' | 'error'). 'remote' returns 'error' and leaves the
+   *          conflict parked when the remote cannot be loaded.
    */
   async resolveConflict(resolution: 'local' | 'remote' | { merged: unknown }): Promise<SaveVerdict> {
+    let remote: RemoteData | null = null;
+    try {
+      remote = await this.provider.load();
+    } catch (e) {
+      if (resolution === 'remote') { this._recordError(e); return 'error'; }
+    }
     this._conflict = false;
     this._conflictRemote = null;
-    const remote = await this.provider.load().catch(() => null);
-    if (remote) { this._base = remote.data; this.baseRev = remote.rev; }
+    if (remote) {
+      this._base = this._snapshot(remote.data);
+      this.baseRev = remote.rev;
+    }
     this._remoteChanged = false;
     if (resolution === 'remote') {
-      this._local = this._base;
+      if (remote) {
+        this._local = this.adopt(remote.data, remote.rev);
+        this._base = this._snapshot(this._local);
+      } else this._local = this._base;
       this._pending = false;
       await this._persist();
       this._emitData();
@@ -337,7 +405,7 @@ export class SyncEngine {
       // Write refused: remote moved — download, merge, retry once.
       const remote = await this.provider.load();
       if (!remote) { this._conflict = true; this._emitStatus(); return 'conflict'; }
-      const merged = this.policy({ base: this._base, local: this._local, remote: remote.data });
+      const merged = this.policy(this._ctx(remote.data, remote.rev));
       if (merged === UNRECONCILABLE) {
         this._conflict = true;
         this._conflictRemote = remote.data;
@@ -346,7 +414,7 @@ export class SyncEngine {
         return 'conflict';
       }
       this._local = merged;
-      this._emitData();
+      this._emitData(remote.rev);
       const retry = await this.provider.save(this._local, remote.rev);
       if (retry.status === 'saved') return await this._markSynced(retry.rev);
       this._conflict = true;
@@ -367,7 +435,7 @@ export class SyncEngine {
 
   /** Marks the working copy as synced at the given remote revision. */
   async _markSynced(rev: string | null): Promise<SaveVerdict> {
-    this._base = this._local;
+    this._base = this._snapshot(this._local);
     this.baseRev = rev;
     this._pending = this._remoteChanged = false;
     this._lastError = undefined;
@@ -443,12 +511,13 @@ export class SyncEngine {
   }
 
   async _persist(): Promise<void> {
-    await Promise.all([
-      this.store.set(SyncEngine.K_BASE, this._base),
+    const entries: Promise<unknown>[] = [
       this.store.set(SyncEngine.K_BASE_REV, this.baseRev),
       this.store.set(SyncEngine.K_LOCAL, this._local),
       this.store.set(SyncEngine.K_PENDING, this._pending)
-    ]);
+    ];
+    if (this.persistBase) entries.push(this.store.set(SyncEngine.K_BASE, this._base));
+    await Promise.all(entries);
   }
 
   _emitStatus(): void {
@@ -456,7 +525,7 @@ export class SyncEngine {
     for (const cb of this._statusCbs) cb(s);
   }
 
-  _emitData(): void {
-    for (const cb of this._dataCbs) cb(this._local);
+  _emitData(rev: string | null = this.baseRev): void {
+    for (const cb of this._dataCbs) cb(this._local, rev);
   }
 }

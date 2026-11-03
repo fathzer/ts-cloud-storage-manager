@@ -47,8 +47,10 @@ the background.
   polls, since the IndexedDB queue is shared) + `BroadcastChannel` to wake
   followers.
 - Ready-made grain-merge helpers (per-grain rev markers, tombstone
-  bookkeeping — see below). The policy seam already lets an app implement
-  all of it.
+  bookkeeping — see below). The policy seam lets an app implement all of
+  it today: the merge ctx carries `baseRev`/`remoteRev`, `adopt` stamps
+  grains on wholesale adoption, and `persistBase: false` drops the stored
+  base snapshot for rev-keyed policies.
 
 ## How a save flows
 
@@ -63,7 +65,9 @@ the background.
      becomes the working copy (`onData` fires) and is re-pushed — the caller
      only sees `'saved'`. `UNRECONCILABLE` → the engine **parks**: retries
      stop, `conflict` + `conflictRemote` are exposed until `resolveConflict`
-     or the next `save()`.
+     or the next `save()`. `resolveConflict('remote')` needs the remote: if
+     it cannot be loaded it returns `'error'`, keeps the conflict parked and
+     leaves the local edits untouched.
    - **network error** — verdict `'queued'`, a success: the edit waits in
      the outbox and the cycle retries on `online`/`visibilitychange`/poll.
    - **other error** — verdict `'error'`, `lastError` set; pending data is
@@ -77,6 +81,17 @@ the background.
 The policy is the app's only sync code — it alone knows the data's shape.
 **It is optional**: omitted, it defaults to `() => UNRECONCILABLE` — every
 divergence parks for user resolution, the conservative whole-file stance.
+The optional `adopt(data, rev)` engine option normalizes payloads the
+engine adopts wholesale (clean pull, init, 'remote' resolution), which is
+where rev-keyed apps stamp grains and drop writer-side dirty/tombstone
+state. Its return value is used as is (even `null`). Merged data and data
+the app saved itself are **never** routed through it, so the policy must
+keep that bookkeeping coherent on its own output. The ctx also carries
+`baseRev` (the local sync point) and `remoteRev`; `persistBase: false`
+skips the base snapshot entirely — neither stored nor kept in memory
+(`ctx.base` is then null). Otherwise the base is a detached copy, so
+editing the working copy in place never alters it. `onData(data, rev)`
+reports the remote revision the data was merged against or adopted from.
 
 **Whole-file app** — the file is the single grain:
 

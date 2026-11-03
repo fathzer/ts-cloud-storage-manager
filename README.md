@@ -92,7 +92,7 @@ imports is guaranteed semver-stable:
 | `StorageProvider` + types (`StorageConfig`, `RemoteData`, `SaveResult`, `StorageStatus`, `AuthFailure`, `ConfirmDialogRequest`, `GoogleDriveConfig`) | the provider contract — implement it for a custom backend |
 | `StorageManager`, `ProviderName` | provider registry + session facade |
 | `ReadOnlyProvider` | the one concrete provider apps instantiate (demo mode, via `useProvider`) |
-| `SyncEngine`, `MergePolicy`, `SaveVerdict`, `SyncStatus`, `SyncEngineOptions`, `UNRECONCILABLE` | offline-first sync |
+| `SyncEngine`, `MergePolicy` (+ `MergeContext`), `SaveVerdict`, `SyncStatus`, `SyncEngineOptions`, `UNRECONCILABLE` | offline-first sync |
 | `LocalStore`, `MemoryStore`, `IdbStore` | sync-state persistence |
 
 Everything else is **internal and free to change**: the OAuth provider
@@ -118,11 +118,19 @@ const storage = new StorageManager({
   // Optional: a present `sync` block enables the offline-first SyncEngine —
   // the manager then owns its lifecycle (see below).
   sync: {
-    policy: ({ base, local, remote }) =>
+    policy: ({ base, baseRev, local, remote, remoteRev }) =>
       mergedData /* …or UNRECONCILABLE when a user decision is needed */,
+    // adopt: (data, rev) => data,         // normalizes a wholesale-adopted
+    //                                     // remote payload (rev stamping,
+    //                                     // dirty clearing); merged/saved
+    //                                     // data never goes through it
     // pollIntervalMs: 60_000,             // visible-tab poll, 0 disables
     // eagerPull: false,                   // detect remote changes only —
     //                                     // adoption waits for pull()
+    // persistBase: false,                 // skip the stored base snapshot —
+    //                                     // ctx.base is null; for policies
+    //                                     // keyed on per-grain revs, not
+    //                                     // base content
     // store: new IdbStore('myapp-sync'),  // IndexedDB '<ns>.cloud-sync'
     //                                     // by default
   },
@@ -167,8 +175,10 @@ const verdict = await storage.save(data); // 'saved' | 'queued' | 'conflict' | '
 
 storage.onStatus(s => { /* s.pending · s.remoteChanged · s.conflict ·
                            s.conflictRemote · s.nextRetryAt · s.lastError */ });
-storage.onData(data => { /* working copy replaced by a merge — re-render */ });
-await storage.resolveConflict('local');  // or 'remote', or { merged: data }
+storage.onData((data, rev) => { /* working copy replaced by a merge — re-render */ });
+await storage.resolveConflict('local');  // or 'remote', or { merged: data };
+                                         // 'remote' → 'error' (still parked)
+                                         // when the remote cannot be loaded
 await storage.pull();                    // eager remote-change check + merge
 ```
 
@@ -253,9 +263,11 @@ namespace.
   of the others (an asset, a row…). A "whole-file" app has exactly one
   grain: the file itself.
 - **merge policy** — a function the app hands to the `SyncEngine`:
-  `{ base, local, remote } → merged | UNRECONCILABLE`. It is the only place
-  that understands the shape of the data — and the only app-specific code
-  sync requires.
+  `{ base, baseRev, local, remote, remoteRev } → merged | UNRECONCILABLE`
+  (the optional `adopt` option normalizes wholesale-adopted remote data,
+  e.g. to stamp per-grain rev markers). It is the only place that
+  understands the shape of the data — and the only app-specific code sync
+  requires.
 - **parked** — when the policy cannot reconcile, the engine stops retrying
   and exposes the conflict through its status channel (`conflict` +
   `conflictRemote`) until the app calls `resolveConflict` or saves again.

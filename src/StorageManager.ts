@@ -141,10 +141,10 @@ export class StorageManager {
   /**
    * Fired when the working copy is replaced by a merge/pull — re-render
    * (forwarded to the managed engine).
-   * @param cb receives the new working copy.
+   * @param cb receives the new working copy and the revision it syncs at.
    * @returns an unsubscribe function.
    */
-  onData(cb: (data: unknown) => void): () => void { return this._requireEngine().onData(cb); }
+  onData(cb: (data: unknown, rev: string | null) => void): () => void { return this._requireEngine().onData(cb); }
 
   /**
    * Resolves a parked conflict (forwarded to the managed engine).
