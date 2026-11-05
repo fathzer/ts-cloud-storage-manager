@@ -1,11 +1,11 @@
 import { GoogleDriveProvider } from './providers/GoogleDriveProvider.js';
 import { DropboxProvider } from './providers/DropboxProvider.js';
 import { OneDriveProvider } from './providers/OneDriveProvider.js';
-import { SyncEngine, UNRECONCILABLE } from './sync/SyncEngine.js';
+import { SyncEngine } from './sync/SyncEngine.js';
 import { IdbStore } from './sync/LocalStore.js';
 import type { StorageProvider, StorageStatus, RemoteData, SaveResult } from './StorageProvider.js';
 import type { StorageConfig } from './config.js';
-import type { MergePolicy, SyncEngineOptions, SaveVerdict, SyncStatus } from './sync/SyncEngine.js';
+import type { SyncEngineOptions, SaveVerdict, SyncStatus, Resolution } from './sync/SyncEngine.js';
 
 /** Names identifying each account-level storage provider. */
 export type ProviderName = 'gdrive' | 'dropbox' | 'onedrive';
@@ -48,7 +48,7 @@ export class StorageManager {
     this._currentName = this._rememberedName();
     this._defaultProvider = this._createProvider(this._currentName);
     this.currentProvider = this._defaultProvider;
-    if (config.sync) this.enableSync(config.sync.policy ?? (() => UNRECONCILABLE), config.sync);
+    if (config.sync) this.enableSync(config.sync);
   }
 
   /** Full browser-storage key for a library-owned entry — every persisted
@@ -109,13 +109,12 @@ export class StorageManager {
    * around the active provider. The manager then owns its whole lifecycle —
    * init on session restore, provider re-wrap on switches, pause during
    * read-only sessions, state purge on disconnect.
-   * @param policy the app-supplied merge policy (defaults to
-   *        always-UNRECONCILABLE: every divergence parks).
-   * @param options store implementation and polling interval.
+   * @param options grain codec (default: the whole file is one grain),
+   *        store implementation and polling interval.
    * @returns the managed SyncEngine — subscribe/save through it.
    */
-  enableSync(policy: MergePolicy = () => UNRECONCILABLE, options: SyncEngineOptions = {}): SyncEngine {
-    this._engine ??= new SyncEngine(this.currentProvider, policy, {
+  enableSync(options: SyncEngineOptions = {}): SyncEngine {
+    this._engine ??= new SyncEngine(this.currentProvider, {
       ...options,
       store: options.store ?? new IdbStore(this._key('cloud-sync'))
     });
@@ -141,17 +140,18 @@ export class StorageManager {
   /**
    * Fired when the working copy is replaced by a merge/pull — re-render
    * (forwarded to the managed engine).
-   * @param cb receives the new working copy and the revision it syncs at.
+   * @param cb receives the new working copy.
    * @returns an unsubscribe function.
    */
-  onData(cb: (data: unknown, rev: string | null) => void): () => void { return this._requireEngine().onData(cb); }
+  onData(cb: (data: unknown) => void): () => void { return this._requireEngine().onData(cb); }
 
   /**
    * Resolves a parked conflict (forwarded to the managed engine).
-   * @param resolution 'local' | 'remote' | {merged: data}.
+   * @param resolution one side for every conflicting grain, or a choice per
+   *        grain id.
    * @returns the verdict of the resolution push.
    */
-  resolveConflict(resolution: 'local' | 'remote' | { merged: unknown }): Promise<SaveVerdict> {
+  resolveConflict(resolution: Resolution): Promise<SaveVerdict> {
     return this._requireEngine().resolveConflict(resolution);
   }
 

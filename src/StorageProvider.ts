@@ -80,7 +80,8 @@ export abstract class StorageProvider {
    * Optimistic-concurrency save.
    * @param data the full data-file payload to write.
    * @param baseRev the rev the data was built from — null means an
-   *        unconditional write (very first save or unknown revision).
+   *        unconditional write (very first save or unknown revision); the
+   *        SyncEngine checks `getRemoteRevision()` before sending one.
    * @returns 'saved' with the new remote revision, or 'conflict' when the
    *          remote file changed since baseRev and the write was refused.
    */

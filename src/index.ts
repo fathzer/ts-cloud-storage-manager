@@ -18,9 +18,11 @@ export type { ProviderName } from './StorageManager.js';
 export { ReadOnlyProvider } from './providers/ReadOnlyProvider.js';
 
 // Offline-first sync layer
-export { SyncEngine, UNRECONCILABLE } from './sync/SyncEngine.js';
+export { SyncEngine } from './sync/SyncEngine.js';
 export type {
-  MergePolicy, MergeContext, SyncEngineOptions, SaveVerdict, SyncStatus
+  SyncEngineOptions, SaveVerdict, SyncStatus, ConflictInfo, ConflictChoice, Resolution
 } from './sync/SyncEngine.js';
+export { WHOLE_FILE_GRAIN } from './sync/grains.js';
+export type { GrainCodec, GrainId, GrainHasher } from './sync/grains.js';
 export { MemoryStore, IdbStore } from './sync/LocalStore.js';
 export type { LocalStore } from './sync/LocalStore.js';

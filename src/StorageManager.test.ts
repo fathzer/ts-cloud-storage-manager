@@ -5,7 +5,7 @@ import { DropboxProvider } from "./providers/DropboxProvider.js";
 import { OneDriveProvider } from "./providers/OneDriveProvider.js";
 import { ReadOnlyProvider } from "./providers/ReadOnlyProvider.js";
 import { MemoryStore, IdbStore } from "./sync/LocalStore.js";
-import { UNRECONCILABLE } from "./sync/SyncEngine.js";
+import { WHOLE_FILE_GRAIN } from "./sync/grains.js";
 
 // Bun has no DOM storage: install minimal in-memory shims before the
 // providers (which read localStorage in their constructor) are built.
@@ -127,33 +127,38 @@ describe("StorageManager.resumeAuth", () => {
 });
 
 describe("StorageManager sync lifecycle", () => {
-  it("enables sync from a bare config.sync block (default always-park policy)", () => {
+  it("enables sync from a bare config.sync block (default whole-file grain)", () => {
     const manager = new StorageManager({ ...CONFIG, sync: {} });
     const engine = manager.syncEngine;
     expect(engine).not.toBeNull();
-    // Default policy: every divergence is unreconcilable.
-    expect(engine!.policy({ base: 1, local: 1, remote: 2 })).toBe(UNRECONCILABLE);
+    // Default codec: the whole file is a single grain.
+    expect([...engine!.codec.split({ v: 1 }).keys()]).toEqual([WHOLE_FILE_GRAIN]);
   });
 
+  it("passes the config.sync grain codec to the engine", () => {
+    const grains = { split: () => new Map(), join: () => null };
+    const manager = new StorageManager({ ...CONFIG, sync: { grains } });
+    expect(manager.syncEngine!.codec).toBe(grains);
+  });
 
   it("create an engine around the active provider via enableSync", () => {
     const manager = new StorageManager(CONFIG);
-    const engine = manager.enableSync(() => UNRECONCILABLE, { store: new MemoryStore() });
+    const engine = manager.enableSync({ store: new MemoryStore() });
     expect(manager.syncEngine).toBe(engine);
     expect(engine.provider).toBe(manager.currentProvider);
     // Idempotent: same instance on a second call.
-    expect(manager.enableSync(() => UNRECONCILABLE)).toBe(engine);
+    expect(manager.enableSync()).toBe(engine);
   });
 
   it("namespaces the default sync store with the config namespace", () => {
     const manager = new StorageManager(CONFIG);
-    const engine = manager.enableSync(() => UNRECONCILABLE);
+    const engine = manager.enableSync();
     expect((engine.store as IdbStore)._dbName).toBe("test.cloud-sync");
   });
 
   it("re-wraps the engine on provider switch, pauses on read-only", async () => {
     const manager = new StorageManager(CONFIG);
-    const engine = manager.enableSync(() => UNRECONCILABLE, { store: new MemoryStore() });
+    const engine = manager.enableSync({ store: new MemoryStore() });
     manager.useProviderByName("dropbox");
     expect(engine.provider).toBe(manager.currentProvider); // re-wrapped
     const readOnly = new ReadOnlyProvider("https://example.com/demo.json");
@@ -163,11 +168,11 @@ describe("StorageManager sync lifecycle", () => {
 
   it("purges the engine state on disconnect", async () => {
     const manager = new StorageManager(CONFIG);
-    const engine = manager.enableSync(() => UNRECONCILABLE, { store: new MemoryStore(), pollIntervalMs: 0 });
+    const engine = manager.enableSync({ store: new MemoryStore(), pollIntervalMs: 0 });
     await engine.save({ v: 1 });                            // offline under Bun → queued/pending
     expect(engine.getLocal()).toEqual({ v: 1 });
     await manager.disconnect();
     expect(engine.getLocal()).toBeNull();
-    expect(engine.baseRev).toBeNull();
+    expect(engine.readRev).toBeNull();
   });
 });

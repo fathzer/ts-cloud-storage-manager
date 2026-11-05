@@ -36,12 +36,13 @@ file from several devices.
 - **Read-only demo mode** — `ReadOnlyProvider` serves a JSON file from a
   plain URL and silently drops saves.
 - **Offline-first sync** — `SyncEngine` keeps a durable local working copy
-  (IndexedDB) plus the last-synced base. *Offline-first* means the local
-  copy is the one the app reads and writes — no network wait — and the
-  cloud is a replica synced in the background: `save()` returns `'saved' |
-  'queued' | 'conflict' | 'error'`, pushes when the network returns, merges
-  through an app-supplied policy and parks real conflicts for user
-  resolution.
+  (IndexedDB) plus, per grain, a hash of the cloud version it was read from.
+  *Offline-first* means the local copy is the one the app reads and writes —
+  no network wait — and the cloud is a replica synced in the background:
+  `save()` returns `'saved' | 'queued' | 'conflict' | 'error'`, pushes when
+  the network returns, merges grain by grain (an app only says how its file
+  splits into grains) and parks the grains edited differently on both sides
+  for user resolution.
 
 | Provider | Auth flow | Session |
 |---|---|---|
@@ -51,12 +52,9 @@ file from several devices.
 | **ReadOnlyProvider** | none — fetches JSON from a plain URL | read-only (demo mode) |
 
 **Not covered yet** — provider push channels (Dropbox `longpoll`
-`watchRemoteChanges`), Web Locks + `BroadcastChannel` multi-tab
-coordination and ready-made grain-level merge helpers (per-grain rev
-markers, tombstones) are designed in [docs/sync-engine.md](docs/sync-engine.md)
-but not implemented. The `SyncEngine` already exists and merges through
-the app-supplied policy, so an app can implement grain-level reconciliation
-inside its policy today.
+`watchRemoteChanges`) and Web Locks + `BroadcastChannel` multi-tab
+coordination are designed in [docs/sync-engine.md](docs/sync-engine.md)
+but not implemented.
 
 ## Install
 
@@ -92,7 +90,8 @@ imports is guaranteed semver-stable:
 | `StorageProvider` + types (`StorageConfig`, `RemoteData`, `SaveResult`, `StorageStatus`, `AuthFailure`, `ConfirmDialogRequest`, `GoogleDriveConfig`) | the provider contract — implement it for a custom backend |
 | `StorageManager`, `ProviderName` | provider registry + session facade |
 | `ReadOnlyProvider` | the one concrete provider apps instantiate (demo mode, via `useProvider`) |
-| `SyncEngine`, `MergePolicy` (+ `MergeContext`), `SaveVerdict`, `SyncStatus`, `SyncEngineOptions`, `UNRECONCILABLE` | offline-first sync |
+| `SyncEngine`, `SaveVerdict`, `SyncStatus`, `SyncEngineOptions`, `ConflictInfo`, `ConflictChoice`, `Resolution` | offline-first sync |
+| `GrainCodec`, `GrainId`, `GrainHasher`, `WHOLE_FILE_GRAIN` | how an app cuts its file into grains |
 | `LocalStore`, `MemoryStore`, `IdbStore` | sync-state persistence |
 
 Everything else is **internal and free to change**: the OAuth provider
@@ -118,19 +117,16 @@ const storage = new StorageManager({
   // Optional: a present `sync` block enables the offline-first SyncEngine —
   // the manager then owns its lifecycle (see below).
   sync: {
-    policy: ({ base, baseRev, local, remote, remoteRev }) =>
-      mergedData /* …or UNRECONCILABLE when a user decision is needed */,
-    // adopt: (data, rev) => data,         // normalizes a wholesale-adopted
-    //                                     // remote payload (rev stamping,
-    //                                     // dirty clearing); merged/saved
-    //                                     // data never goes through it
+    // How the file splits into grains — the independently reconcilable
+    // pieces. Omitted: the whole file is one grain (any divergence parks).
+    grains: {
+      split: (data) => new Map(data.items.map(i => [i.id, i])),
+      join: (grains) => ({ items: [...grains.values()] }),
+    },
+    // hash: (grain) => '…',               // default: SHA-256 of canonical JSON
     // pollIntervalMs: 60_000,             // visible-tab poll, 0 disables
     // eagerPull: false,                   // detect remote changes only —
     //                                     // adoption waits for pull()
-    // persistBase: false,                 // skip the stored base snapshot —
-    //                                     // ctx.base is null; for policies
-    //                                     // keyed on per-grain revs, not
-    //                                     // base content
     // store: new IdbStore('myapp-sync'),  // IndexedDB '<ns>.cloud-sync'
     //                                     // by default
   },
@@ -174,19 +170,19 @@ await storage.initialize();              // inits the engine too
 const verdict = await storage.save(data); // 'saved' | 'queued' | 'conflict' | 'error'
 
 storage.onStatus(s => { /* s.pending · s.remoteChanged · s.conflict ·
-                           s.conflictRemote · s.nextRetryAt · s.lastError */ });
-storage.onData((data, rev) => { /* working copy replaced by a merge — re-render */ });
-await storage.resolveConflict('local');  // or 'remote', or { merged: data };
-                                         // 'remote' → 'error' (still parked)
-                                         // when the remote cannot be loaded
+                           s.conflicts · s.nextRetryAt · s.lastError */ });
+storage.onData(data => { /* working copy replaced by a merge — re-render */ });
+await storage.resolveConflict('local');  // or 'remote' for every conflicting
+                                         // grain, or one choice per grain id:
+await storage.resolveConflict({ car1: 'local', car2: 'remote', car3: { merged: grain } });
 await storage.pull();                    // eager remote-change check + merge
 ```
 
 `save(data)` dispatches to the engine when sync is enabled; the two-arg
 `save(data, baseRev)` remains the raw guarded write for non-sync apps.
 `storage.syncEngine` exposes the engine instance for engine-specific
-calls (`getLocal()`, `reset()`…); `storage.enableSync(policy, options)`
-is the lazy equivalent when the config cannot carry the policy at
+calls (`getLocal()`, `reset()`…); `storage.enableSync(options)`
+is the lazy equivalent when the config cannot carry the options at
 construction time. The manager owns the plumbing: `initialize()`/
 `authenticate()` init the engine once a session exists,
 `useProviderByName()`/`useProvider()` re-wrap it around the new provider
@@ -200,16 +196,17 @@ network returns (`online`, `visibilitychange`, visible-tab polling) —
 flag): adoption/merge waits for an explicit `pull()`, e.g. behind a
 "new version available" button.
 
-The merge policy is **invoked inside `save()`** (and inside pulls when
-both sides moved): a remote conflict → remote is downloaded →
-`policy({base, local, remote})` → reconciled data is re-pushed and the
-caller just sees `'saved'`. Only `UNRECONCILABLE` surfaces as `'conflict'`:
-the engine then **parks** and reports the losing remote version in the
-status (`conflictRemote`) so the resolution UI can show both sides, until
-`resolveConflict('local' | 'remote' | {merged})` or the next `save()`. A
-whole-file app
-can pass a trivial policy; a granular app does its grain reconciliation
-inside it. `engine.reset()` purges base + outbox on disconnect.
+The reconciliation runs **inside `save()`** (and inside pulls when the
+cloud moved): a refused write → the cloud file is downloaded → each grain
+is decided from content hashes alone (edited here only → kept and pushed;
+edited in the cloud only → taken; same edit on both sides → nothing to do)
+→ the merged copy is re-pushed and the caller just sees `'saved'`. Only a
+grain **edited differently on both sides** surfaces as `'conflict'`: the
+engine then **parks** and reports both versions of each conflicting grain
+in the status (`conflicts`), until `resolveConflict(…)`. Edits made while
+parked stay local and are not pushed. No grain codec needed for a
+whole-file app — the file is then the only grain. `engine.reset()` purges
+the local state on disconnect.
 
 ## Storage namespace
 
@@ -259,18 +256,20 @@ namespace.
   database built into every browser), then pushed to the cloud when the
   network allows. No network? Nothing is lost: `'queued'` means "safely
   stored, will sync later".
-- **grain** — a piece of data the merge policy can reconcile independently
-  of the others (an asset, a row…). A "whole-file" app has exactly one
-  grain: the file itself.
-- **merge policy** — a function the app hands to the `SyncEngine`:
-  `{ base, baseRev, local, remote, remoteRev } → merged | UNRECONCILABLE`
-  (the optional `adopt` option normalizes wholesale-adopted remote data,
-  e.g. to stamp per-grain rev markers). It is the only place that
-  understands the shape of the data — and the only app-specific code sync
-  requires.
-- **parked** — when the policy cannot reconcile, the engine stops retrying
-  and exposes the conflict through its status channel (`conflict` +
-  `conflictRemote`) until the app calls `resolveConflict` or saves again.
+- **grain** — a piece of data that is reconciled independently of the
+  others (an asset, a row…). A "whole-file" app has exactly one grain: the
+  file itself.
+- **grain codec** — `{ split, join }`, the two functions an app hands to the
+  `SyncEngine` to cut its file into grains and rebuild it. It is the only
+  place that understands the shape of the data — and the only app-specific
+  code sync requires.
+- **source hashes** — per grain, the hash of the cloud version the local
+  copy was last read from or pushed to. They tell a local edit from a
+  remote one without ever keeping a copy of the source data.
+- **parked** — when a grain was edited differently on both sides, the
+  engine stops pushing and exposes the conflicting grains through its
+  status channel (`conflict` + `conflicts`) until the app calls
+  `resolveConflict`.
 
 ### The `rev` token
 
@@ -344,12 +343,12 @@ re-consent dialog (`confirmDialog`).
 
 ```
 ┌──────────────────────────── your app ────────────────────────────┐
-│  UI · data model · merge policy · conflict-resolution dialog     │
+│  UI · data model · grain codec · conflict-resolution dialog      │
 └───────────────────────────────┬──────────────────────────────────┘
                                 │ load() · save() · getRemoteRevision()
 ┌───────────────────────────────▼──────────────────────────────────┐
 │  SyncEngine                                                     │
-│  offline outbox (IndexedDB) · policy-driven merge ·              │
+│  offline outbox (IndexedDB) · hash-based grain merge ·           │
 │  eager pull + explicit push · status channel                     │
 └───────────────────────────────┬──────────────────────────────────┘
                                 │
@@ -372,14 +371,14 @@ re-consent dialog (`confirmDialog`).
 ```
 
 The `SyncEngine` slots between the app and the provider:
-`storage.enableSync(policy)` creates it around the active provider and the
+`storage.enableSync(options)` creates it around the active provider and the
 manager owns its lifecycle (init on session restore, re-wrap on provider
 switch, pause on read-only, purge on disconnect). The engine itself only
 depends on the `StorageProvider` contract — it works unchanged across
-providers. The app supplies a merge policy (it alone knows what a
+providers. The app supplies a grain codec (it alone knows what a
 "syncable grain" is — an asset, a row…), the engine owns the offline
-queue, reconciliation retries, eager pulls + explicit push, and a status
-channel. Not implemented (design in `docs/sync-engine.md`): push-channel
+queue, the hash-based reconciliation, eager pulls + explicit push, and a
+status channel. Not implemented (design in `docs/sync-engine.md`): push-channel
 watching and multi-tab coordination.
 `ReadOnlyProvider` sits outside the config-driven registry: the app
 injects it with `useProvider()` for demo sessions.

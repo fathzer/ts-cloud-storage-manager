@@ -1,4 +1,4 @@
-import type { MergePolicy, SyncEngineOptions } from './sync/SyncEngine.js';
+import type { SyncEngineOptions } from './sync/SyncEngine.js';
 
 /**
  * Application wiring: a provider is offered only when its config block is
@@ -48,9 +48,6 @@ export interface ConfirmDialogRequest {
   cancelLabel: string;
 }
 
-/** The `sync` block of {@link StorageConfig}: policy + engine options. */
-export interface SyncConfig extends SyncEngineOptions {
-  /** Merge policy — defaults to always UNRECONCILABLE: every divergence
-   *  parks for user resolution (the conservative whole-file behavior). */
-  policy?: MergePolicy;
-}
+/** The `sync` block of {@link StorageConfig}: the engine options (grain
+ *  codec, store, polling…). */
+export type SyncConfig = SyncEngineOptions;
